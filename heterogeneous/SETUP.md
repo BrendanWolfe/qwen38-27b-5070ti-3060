@@ -6,7 +6,7 @@ Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
 | `start_qwen_stable.sh` | general-purpose, MTP-3 | 140k (146,847-token pool) | FP8 | **~84 tok/s** |
-| `start_qwen_dflash2.sh` | short-context DFlash2 | 32k (33,506-token pool) | BF16 | **~92 tok/s** |
+| `start_qwen_dflash2.sh` | short-context DFlash2 | 32k (33,506-token pool) | BF16 | **~92 tok/s** avg (77–159 t/s by workload) |
 
 Everything is driven by this fork (`BrendanWolfe/qwen38-27b-rtx3090`) of
 [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090) —
@@ -148,7 +148,10 @@ bash heterogeneous/start_qwen_dflash2.sh
 ```
 
 Same endpoint/port/model name, but BF16 KV, 32k context, and DFlash2 drafting
-(~92 tok/s). It pins `--kv-cache-memory=2500000000` on purpose: vLLM's
+(~92 tok/s average; real traffic measures **77–159 t/s** depending on the
+workload — the high end on long generations and on copy/quote/edit tasks,
+where the lookup drafter proposes straight from the prompt). It pins
+`--kv-cache-memory=2500000000` on purpose: vLLM's
 automatic sizing over-allocates the 3060 rank (which also carries the drafter)
 until NCCL cannot even allocate a 40-byte buffer. If you change `MAX_LEN`,
 re-tune `DFLASH_KV_MEMORY` — too low fails startup with a "KV cache is needed,

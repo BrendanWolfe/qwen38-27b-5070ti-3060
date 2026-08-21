@@ -11,7 +11,7 @@ Two setups are supported:
 | profile | launcher | speculation | KV | context | measured decode |
 |---|---|---|---|---|---|
 | stable / general | `start_qwen_stable.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (146,847-token pool) | **83.8-84.9 tok/s** |
-| short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** |
+| short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
 
 `start_qwen.sh` is the shared, tunable launcher both profiles wrap;
 `start_qwen_short.sh` is a scratch wrapper for short-context MTP experiments.
@@ -186,6 +186,28 @@ JSON-schema structured output, penalties, streaming, thinking mode,
 completions echo+logprobs, a 21,755-token prompt, and the expected
 `thinking_token_budget` 400 on the V2 runner), and Qwen tool-call parsing
 returned a valid `get_weather({"city": "Paris"})` call.
+
+### DFlash2 speed is workload-dependent
+
+Decode speed is not a single number. Per-request llama-swap telemetry (the
+profile's own `--enable-per-request-metrics` output) on real traffic at
+8–25k context:
+
+| speed band | observed | what the requests were |
+|---|---:|---|
+| **77–89 t/s** | 77.5, 80.4, 81.3, 83.2, 83.8, 86.5, 88.6 | general chat/generation from context |
+| **106–159 t/s** | 106.4, 125.5, 158.7 | long generations and context-reproducing work |
+
+Two artifacts to ignore: 3–64-token requests measure 15–49 t/s because queue +
+TTFT dominate their duration, not decode; and the same ~9k context produces
+both 77 t/s and 159 t/s, which is acceptance, not context length. The spread is
+DFlash2 doing what it was built for: its 7-token proposal is verified whole
+when the continuation is predictable, and the lookup drafter
+(`VLLM_DFLASH2_LOOKUP=1`, on by default) proposes straight from the prompt
+when the model is quoting, editing, or copying — the 106–159 t/s rows. The
+91.7 t/s benchmark is an average over eight mixed realistic prompts; treat it
+as the midpoint of a workload-shaped range, with the high end on reproduction
+and editing.
 
 ## llama-swap integration
 

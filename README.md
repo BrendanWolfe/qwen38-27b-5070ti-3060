@@ -14,7 +14,7 @@ stage boundary.
 | profile | launcher | KV | context | measured decode |
 |---|---|---|---|---|
 | **stable / general** | `heterogeneous/start_qwen_stable.sh` | FP8 | 140k (146,847-token pool) | **83.8–84.9 tok/s** |
-| **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **91.7 tok/s** |
+| **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
 
 Both use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
 vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
