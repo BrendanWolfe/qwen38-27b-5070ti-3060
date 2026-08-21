@@ -165,12 +165,11 @@ SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
 
 ## 8. (Optional) llama-swap front door
 
-Install llama-swap, then merge the four model entries from
+Install llama-swap, then merge the two model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
 - `vllm-speed/qwen3.8-27b` — stable 140k MTP (`start_qwen_stable.sh`)
-- `vllm-speed/qwen3.8-27b-32k`, `vllm-speed/qwen3.8-27b-65k` — MTP experiments
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
 
 Notes that matter:

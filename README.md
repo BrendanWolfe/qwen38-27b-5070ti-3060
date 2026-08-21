@@ -38,18 +38,17 @@ profile.
   crashes inside DFlash's private CUDA graph, so the drafter runs eagerly while
   the target keeps compilation and graphs).
 - **Launchers** — `heterogeneous/start_qwen.sh` (shared, tunable),
-  `start_qwen_stable.sh` (frozen MTP snapshot), `start_qwen_short.sh`
-  (32k/65k MTP experiments), `start_qwen_dflash2.sh` (32k DFlash2). They encode
+  `start_qwen_stable.sh` (frozen MTP snapshot) and `start_qwen_dflash2.sh`
+  (32k DFlash2). They encode
   the host/toolchain fixes this pair needed: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
   `TORCH_CUDA_ARCH_LIST="8.6;12.0"`, GCC 15 for CUDA 13.3's JIT, unsetting
   `VLLM_MARLIN_INPUT_DTYPE` for W4A16, `GPU_UTIL=0.91` (0.93 OOMed compiled
   prefill), process-group cleanup under `setsid`, `NO_API_KEY` mode, and the
   vLLM flags for accurate per-request metrics and Qwen tool calling.
-- **llama-swap** — the four model entries in
+- **llama-swap** — the two model entries in
   `heterogeneous/llama-swap.example.yaml`:
-  `vllm-speed/qwen3.8-27b` (stable), `vllm-speed/qwen3.8-27b-32k`,
-  `vllm-speed/qwen3.8-27b-65k`, `vllm-speed/qwen3.8-27b-dflash2` (unprefixed
-  IDs kept as aliases).
+  `vllm-speed/qwen3.8-27b` (stable) and `vllm-speed/qwen3.8-27b-dflash2`
+  (unprefixed IDs kept as aliases).
 - **Docker** — a `hetero` compose profile (two-GPU reservation) and a `hetero`
   entrypoint command.
 

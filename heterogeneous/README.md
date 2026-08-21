@@ -13,8 +13,7 @@ Two setups are supported:
 | stable / general | `start_qwen_stable.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (146,847-token pool) | **83.8-84.9 tok/s** |
 | short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
 
-`start_qwen.sh` is the shared, tunable launcher both profiles wrap;
-`start_qwen_short.sh` is a scratch wrapper for short-context MTP experiments.
+`start_qwen.sh` is the shared, tunable launcher both profiles wrap.
 
 ## Why pipeline parallelism
 
@@ -37,11 +36,9 @@ gain, so `44,20` remains the default.
   MTP/DFlash2/no-spec selection, process-group cleanup, no-auth mode.
 - `heterogeneous/start_qwen_stable.sh` — frozen MTP snapshot used by the
   stable llama-swap model, so later experiments cannot change its behavior.
-- `heterogeneous/start_qwen_short.sh` — scratch wrapper for 32k/65k MTP
-  experiments.
 - `heterogeneous/start_qwen_dflash2.sh` — 32k DFlash2 profile (BF16 KV,
   manually sized cache, eager drafter; see below).
-- `heterogeneous/llama-swap.example.yaml` — the four llama-swap model entries.
+- `heterogeneous/llama-swap.example.yaml` — the two llama-swap model entries.
 - `patches/vllm-pr46994-mtp-pp.patch` — MTP + pipeline parallelism (below).
 - `patches/zz-dflash2-pipeline-parallel.patch` — DFlash2 + pipeline
   parallelism (below). The `zz-` prefix keeps it last in the `patches/*.patch`
@@ -211,12 +208,10 @@ and editing.
 
 ## llama-swap integration
 
-`heterogeneous/llama-swap.example.yaml` holds the four model entries (also
+`heterogeneous/llama-swap.example.yaml` holds the two model entries (also
 what runs on the origin host):
 
 - `vllm-speed/qwen3.8-27b` — stable 140k MTP (`start_qwen_stable.sh`)
-- `vllm-speed/qwen3.8-27b-32k` / `vllm-speed/qwen3.8-27b-65k` — experimental
-  MTP (`start_qwen_short.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — experimental 32k DFlash2
   (`start_qwen_dflash2.sh`)
 
@@ -273,9 +268,6 @@ Examples:
 ```bash
 # Frozen stable profile (what llama-swap runs)
 bash heterogeneous/start_qwen_stable.sh
-
-# Experimental 65k MTP profile (set MAX_LEN=32768 for 32k)
-bash heterogeneous/start_qwen_short.sh
 
 # Experimental 32k DFlash2 profile
 bash heterogeneous/start_qwen_dflash2.sh

@@ -20,30 +20,6 @@
     checkEndpoint: /health
     ttl: 900
     unloadTimeout: 60
-  "vllm-speed/qwen3.8-27b-32k":
-    name: "Qwen3.8 27B 32k (experimental fast profile)"
-    description: "Experimental FP8-KV/MTP profile capped at 32k; stable 140k profile is vllm-speed/qwen3.8-27b."
-    aliases:
-      - "qwen3.8-27b-32k"
-    useModelName: "qwen3.8-27b"
-    cmd: |
-      /usr/bin/env PORT='${PORT}' NO_API_KEY=1 MAX_LEN=32768 KV=fp8 \
-      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_short.sh
-    checkEndpoint: /health
-    ttl: 900
-    unloadTimeout: 60
-  "vllm-speed/qwen3.8-27b-65k":
-    name: "Qwen3.8 27B 65k (experimental fast profile)"
-    description: "Experimental FP8-KV/MTP profile capped at 65k; stable 140k profile is vllm-speed/qwen3.8-27b."
-    aliases:
-      - "qwen3.8-27b-65k"
-    useModelName: "qwen3.8-27b"
-    cmd: |
-      /usr/bin/env PORT='${PORT}' NO_API_KEY=1 MAX_LEN=65536 KV=fp8 \
-      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_short.sh
-    checkEndpoint: /health
-    ttl: 900
-    unloadTimeout: 60
   "vllm-speed/qwen3.8-27b-dflash2":
     name: "Qwen3.8 27B 32k (experimental DFlash2 profile)"
     description: "Experimental BF16-KV/DFlash2 profile with PP auxiliary-state relay; needs prepare/fetch_dflash2.py first."
