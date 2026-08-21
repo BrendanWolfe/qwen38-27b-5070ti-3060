@@ -56,6 +56,9 @@ profile.
 Full details, benchmarks, the DFlash2 memory-sizing trap, and limitations are
 in [heterogeneous/README.md](heterogeneous/README.md); the two-GPU work is also
 summarised at the end of [docs/optimizations.md](docs/optimizations.md).
+Step-by-step instructions for someone starting from scratch on this exact GPU
+pair (download, model creation, patches, run, llama-swap) are in
+[heterogeneous/SETUP.md](heterogeneous/SETUP.md).
 
 ---
 # Qwen3.8-27B on one RTX 3090
