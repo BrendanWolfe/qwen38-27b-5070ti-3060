@@ -13,7 +13,8 @@
 #    change for +2.2% perplexity. Needs both marlin patches from patches/.
 #    INT8_LAYERS=gate_up is the gentler variant (+0.9% PPL, ~+15%);
 #    INT8_ACT= (empty) turns it off entirely (pure W4A16, quality-neutral).
-#  - --language-model-only skips the vision tower entirely (~2.7 GB saved)
+#  - --language-model-only skips the vision tower entirely (0.87 GiB on this
+#    checkpoint); VISION=1 keeps it for a client that sends images
 #  - expandable_segments is required: the DeltaNet prefill kernels allocate
 #    transient workspace and fragment the allocator, OOMs at util >= 0.978 without it
 #  - gpu-memory-utilization 0.972 is the sweet spot on a headless box
@@ -89,6 +90,30 @@ fi
 TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
 TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
 
+# Vision. --language-model-only drops the vision tower cleanly -- no weights loaded,
+# 2.7 GB saved (gotcha 9) -- which is right for a text-only server and stays the
+# default. VISION=1 keeps the tower, for a client that sends images: screenshots
+# into a coding assistant, captioning, document photos.
+#
+# The pixel cap is the part worth setting rather than leaving to the processor
+# default: vLLM profiles the encoder at the largest image the processor will accept,
+# and that profiled peak comes out of the KV pool. VISION_MAX_PIXELS=2097152 is
+# 2048 image tokens.
+#
+# This is not something EXTRA_ARGS can do safely: --language-model-only would still
+# be passed below, and whether vision came on would depend on which flag argparse
+# saw last. It also regresses silently -- images are still accepted and still
+# counted as prompt tokens, and the model answers from placeholder embeddings.
+VISION_IMAGES=${VISION_IMAGES:-1}
+VISION_MIN_PIXELS=${VISION_MIN_PIXELS:-65536}
+VISION_MAX_PIXELS=${VISION_MAX_PIXELS:-2097152}
+if [ "${VISION:-0}" = 1 ]; then
+  VISION_ARGS="--limit-mm-per-prompt {\"image\":{\"count\":$VISION_IMAGES}}"
+  VISION_ARGS="$VISION_ARGS --mm-processor-kwargs {\"size\":{\"shortest_edge\":$VISION_MIN_PIXELS,\"longest_edge\":$VISION_MAX_PIXELS}}"
+else
+  VISION_ARGS="--language-model-only"
+fi
+
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable for WSL2 (see single-user/start_qwen.sh).
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
@@ -110,7 +135,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-model-len $MAX_LEN \
   --max-num-seqs $MAX_SEQS \
   --api-server-count $API_SERVERS \
-  --language-model-only \
+  ${VISION_ARGS} \
   $KV_ARGS \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \

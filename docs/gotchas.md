@@ -42,7 +42,15 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 8. **Benchmark twice.** The first run after any restart includes JIT warmup
    and reads 30-50% low.
 9. **`--language-model-only` drops the vision tower cleanly** (no weights
-   loaded). If you don't need images, that's 2.7 GB.
+   loaded), and it is the default in both start scripts. `VISION=1` keeps the
+   tower for a client that sends images. On the W4A16 checkpoint the tower is
+   **0.87 GiB**, not the 2.7 GB of the bf16 original: model loading reads 15.13
+   GiB against 14.26 with `--language-model-only`, same server, same config.
+   The KV pool came out within 0.4% across that pair (183,673 against 184,438
+   tokens at 150k/fp8) — but the profiled activation peak differed by 0.87 GiB
+   between those two starts, which is the same run-to-run swing the V2 runner
+   shows, so read the pool difference as noise rather than as a measurement of
+   what the tower costs.
 10. **`prompt_logprobs` on long prompts OOMs the engine at 0.972 utilization**
     (a 300-token prompt needs ~300 MB of fp32 logits and there is no headroom).
     Run quality checks at 0.93.
