@@ -7,7 +7,8 @@ the same W4A16 Qwen3.8-27B across a 16 GiB RTX 5070 Ti (`sm120`) and a 12 GiB
 RTX 3060 (`sm86`). Pipeline parallelism is used instead of tensor parallelism
 because the cards are unequal and have no P2P path; the 44/20 layer split keeps
 most of the target on the faster card and transfers activations only at the
-stage boundary.
+stage boundary. The conversion of the upstream 3090 codebase into this
+two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
 ## Two setups
 
