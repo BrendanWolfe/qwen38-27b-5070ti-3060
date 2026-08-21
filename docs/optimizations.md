@@ -262,3 +262,42 @@ step at 12-36k, where MTP is 5-10% ahead e2e). `CTX=long`/`huge` stay MTP. For
 one to four people chatting with normal context — what single-user mode is for
 — it is the fastest config in this repo. Full table in
 [single-user/README.md](../single-user/README.md).
+
+### Two unequal GPUs: pipeline-parallel MTP and DFlash2 (`heterogeneous/`)
+
+Everything above assumes one 24 GB card. `heterogeneous/` spreads the same
+W4A16 model over a 16 GiB RTX 5070 Ti (`sm120`) and a 12 GiB RTX 3060 (`sm86`)
+with an uneven 44/20-layer pipeline split — TP is a non-starter (the cards have
+no P2P path and unequal capacity), and PP only pays one activation transfer at
+the stage boundary. That took two more vLLM patches and a handful of host
+fixes; the full write-up, benchmarks, and llama-swap entries are in
+[heterogeneous/README.md](../heterogeneous/README.md).
+
+**MTP + PP** (`patches/vllm-pr46994-mtp-pp.patch`) is a backport of upstream
+PR #46994 for the V2 runner — sampled/draft-token broadcasts padded and relayed
+between ranks, the MTP projection on the last stage only — plus a hybrid-Mamba
+fix the backport needs in practice: `index_fill_` indices cast to int64 in
+`mamba_hybrid.py`, without which PP long prefill crashes. With FP8 KV, MTP-3,
+fp16 recurrent state, prefix caching and four slots it decodes at **84 tok/s**
+single-stream (32.6 non-speculative) with a 146,847-token KV pool — a real
+130,916-token prompt completes. `GPU_UTIL=0.91`, not 0.93: startup profiling
+omits the compiled-prefill workspace, and 0.93 OOMed a worker mid-request (the
+wrapper now runs vLLM under `setsid` and kills the whole process group on
+failure, because that OOM orphaned PP workers at 100% GPU).
+
+**DFlash2 + PP** (`patches/zz-dflash2-pipeline-parallel.patch`) is not
+upstream at all: the runner rejects it outright. The patch relays the target's
+auxiliary hidden states (layers 5/19/33 live on the first stage, 47/61 on the
+second) across the boundary inside `IntermediateTensors`, expands the
+intermediate-tensor factories accordingly, validates the complete small
+drafter as PP-local on the last rank, and shares the target's embedding table
+and quantized LM head instead of allocating ~2.4 GiB BF16 temporaries that
+OOM the 12 GiB card. Two operational findings: vLLM's automatic KV sizing
+over-allocates the drafter rank until NCCL cannot allocate a 40-byte broadcast
+buffer, so the profile pins `--kv-cache-memory` by bytes; and the shared
+Marlin LM head's candidate GEMM crashes inside DFlash's private CUDA graph
+capture, so the drafter runs eagerly (`VLLM_DFLASH_CUDAGRAPH=0`) while the
+target keeps compilation and graphs. Net: **91.7 tok/s** on the eight realistic
+short prompts where FP8 MTP-3 reads 75.45, with the 12/12 API smoke suite and
+tool calling passing. MTP remains the general/long-context profile; DFlash2 is
+the short-context one.

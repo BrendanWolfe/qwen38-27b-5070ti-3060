@@ -3,6 +3,7 @@
 #   docker compose --profile single up -d     # low latency: MTP speculative decoding
 #   docker compose --profile batch  up -d     # throughput
 #   docker compose run --rm prepare           # just download + requantize the model
+#   docker compose --profile hetero up -d     # RTX 5070 Ti + RTX 3060 (experimental)
 #   docker compose run --rm single verify     # verify.sh inside the container
 #
 # Knobs go in a .env file next to this file (never committed): VLLM_API_KEY=...,
@@ -67,6 +68,18 @@ services:
     <<: *serve
     profiles: [batch]
     command: batch
+
+  hetero:
+    <<: *serve
+    profiles: [hetero]
+    command: hetero
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
 
 volumes:
   qwen-cache:

@@ -1,0 +1,268 @@
+DFlash2 speculative decoding with pipeline parallelism (heterogeneous two-GPU
+setups, e.g. RTX 5070 Ti + RTX 3060 in heterogeneous/).
+
+Upstream vLLM 0.27.1 refuses DFlash under pipeline parallelism. This patch:
+- relays EAGLE3-style auxiliary hidden states across PP stage boundaries in
+  qwen3_next.py (they ride in IntermediateTensors next to hidden_states and
+  residual, in configured target-layer order),
+- expands the intermediate-tensor factories for incoming aux states and
+  refreshes the multimodal wrapper's cached factory (qwen3_5.py,
+  model_runner.py),
+- permits method "dflash" with PP in the V2 model runner and validates the
+  complete drafter as PP-local on the last rank (config/speculative.py),
+- shares the target embedding table and LM head with the drafter instead of
+  allocating temporary multi-GiB BF16 copies (qwen3_dflash.py, dflash/utils.py),
+- accepts the PP intermediate_tensors kwarg in DFlashSpeculator.propose and
+  adds VLLM_DFLASH_CUDAGRAPH=0 to run the drafter eagerly — required here
+  because the shared target LM head is Marlin-quantized and its candidate GEMM
+  crashes inside DFlash's private CUDA graph capture.
+
+Apply AFTER every other patch in this directory (the zz- prefix keeps glob
+order correct):
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < zz-dflash2-pipeline-parallel.patch
+
+--- a/config/speculative.py
++++ b/config/speculative.py
+@@ -1317,8 +1317,17 @@
+             )
+ 
+         if self.draft_model_config:
++            draft_parallel_config = self.draft_parallel_config
++            if (
++                self.method == "dflash"
++                and draft_parallel_config.pipeline_parallel_size > 1
++            ):
++                # DFlash's complete, small draft model lives only on the last
++                # target PP rank; it is local rather than pipeline-sharded.
++                draft_parallel_config = copy.copy(draft_parallel_config)
++                draft_parallel_config.pipeline_parallel_size = 1
+             self.draft_model_config.verify_with_parallel_config(
+-                self.draft_parallel_config
++                draft_parallel_config
+             )
+ 
+         if self.use_heterogeneous_vocab and not self.uses_draft_model():
+--- a/model_executor/models/qwen3_5.py
++++ b/model_executor/models/qwen3_5.py
+@@ -349,6 +349,20 @@
+ 
+     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+         self.model.aux_hidden_state_layers = layers
++        # Non-first PP ranks need persistent receive buffers for every
++        # auxiliary state captured before their stage boundary. The runner
++        # calls this before allocating its IntermediateTensors buffer.
++        num_incoming_aux = sum(
++            layer_idx <= self.model.start_layer for layer_idx in layers
++        )
++        names = ["hidden_states", "residual"] + [
++            f"aux_hidden_state_{i}" for i in range(num_incoming_aux)
++        ]
++        factory = make_empty_intermediate_tensors_factory(
++            names, self.config.hidden_size
++        )
++        self.model.make_empty_intermediate_tensors = factory
++        self.make_empty_intermediate_tensors = factory
+ 
+     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+         num_layers = len(self.model.layers)
+--- a/model_executor/models/qwen3_dflash.py
++++ b/model_executor/models/qwen3_dflash.py
+@@ -43,6 +43,7 @@
+ from .qwen3 import Qwen3ForCausalLM
+ from .utils import (
+     AutoWeightsLoader,
++    PPMissingLayer,
+     WeightsMapper,
+     get_draft_quant_config,
+     maybe_prefix,
+@@ -403,11 +404,17 @@
+ 
+         current_vllm_config = get_current_vllm_config()
+ 
+-        self.embed_tokens = VocabParallelEmbedding(
+-            self.config.vocab_size,
+-            self.config.hidden_size,
+-            prefix=maybe_prefix(prefix, "embed_tokens"),
+-        )
++        # Checkpoints without their own embeddings share the target table.
++        # Avoid allocating a temporary 2.37 GiB BF16 table before the loader
++        # replaces it, which is especially important on the last PP rank.
++        if not getattr(self.config, "has_own_embed_tokens", False):
++            self.embed_tokens = PPMissingLayer()
++        else:
++            self.embed_tokens = VocabParallelEmbedding(
++                self.config.vocab_size,
++                self.config.hidden_size,
++                prefix=maybe_prefix(prefix, "embed_tokens"),
++            )
+ 
+         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
+         # checkpoints will have the mask embedding in the vocabulary embedding table
+@@ -706,11 +713,16 @@
+         )
+ 
+         logit_scale = getattr(self.config, "logit_scale", 1.0)
+-        self.lm_head = ParallelLMHead(
+-            self.config.draft_vocab_size,
+-            self.config.hidden_size,
+-            prefix=maybe_prefix(prefix, "lm_head"),
+-        )
++        # DFlash2 normally shares the target LM head. Do not allocate a full
++        # temporary BF16 head when the checkpoint contains no private copy.
++        if not getattr(self.config, "has_own_lm_head", False):
++            self.lm_head = PPMissingLayer()
++        else:
++            self.lm_head = ParallelLMHead(
++                self.config.draft_vocab_size,
++                self.config.hidden_size,
++                prefix=maybe_prefix(prefix, "lm_head"),
++            )
+         self.logits_processor = LogitsProcessor(
+             self.config.draft_vocab_size, scale=logit_scale
+         )
+--- a/model_executor/models/qwen3_next.py
++++ b/model_executor/models/qwen3_next.py
+@@ -661,8 +661,24 @@
+             hidden_states = intermediate_tensors["hidden_states"]
+             residual = intermediate_tensors["residual"]
+ 
++        # Eagle/DFlash auxiliary states produced by earlier pipeline stages
++        # travel alongside the normal hidden/residual boundary tensors. Their
++        # ordering is the configured target-layer ordering.
++        num_incoming_aux = sum(
++            layer_idx <= self.start_layer
++            for layer_idx in self.aux_hidden_state_layers
++        )
++        aux_hidden_states = (
++            [
++                intermediate_tensors[f"aux_hidden_state_{i}"]
++                for i in range(num_incoming_aux)
++            ]
++            if not get_pp_group().is_first_rank
++            else []
++        )
++
+         full_num_tokens = positions.shape[-1]
+-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
++        self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
+         for layer_idx, layer in enumerate(
+             islice(self.layers, self.start_layer, self.end_layer),
+             start=self.start_layer,
+@@ -696,9 +712,14 @@
+             )
+ 
+         if not get_pp_group().is_last_rank:
+-            return IntermediateTensors(
+-                {"hidden_states": hidden_states, "residual": residual}
++            tensors = {"hidden_states": hidden_states, "residual": residual}
++            tensors.update(
++                {
++                    f"aux_hidden_state_{i}": value
++                    for i, value in enumerate(aux_hidden_states)
++                }
+             )
++            return IntermediateTensors(tensors)
+         if hidden_states.shape[0] != full_num_tokens:
+             hidden_states, residual = _all_gather_hidden_and_residual(
+                 hidden_states,
+--- a/v1/worker/gpu/model_runner.py
++++ b/v1/worker/gpu/model_runner.py
+@@ -112,6 +112,7 @@
+ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
+ from vllm.v1.worker.gpu.spec_decode import init_speculator
+ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
++    get_eagle3_aux_layers_from_config,
+     set_eagle3_aux_hidden_state_layers,
+ )
+ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+@@ -210,7 +211,10 @@
+             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
+                 # Drafting may require auxiliary hidden states from target model outputs
+                 self.use_aux_hidden_state_outputs = True
+-                if self.use_pp:
++                # DFlash runs its complete drafter on the last PP rank. Qwen's
++                # target model relays the requested auxiliary hidden states
++                # across stage boundaries; Eagle3/DSpark still lack that path.
++                if self.use_pp and self.speculative_config.method != "dflash":
+                     raise ValueError(
+                         f"{self.speculative_config.method} with pipeline parallel "
+                         "is not supported."
+@@ -322,6 +326,21 @@
+             if self.use_aux_hidden_state_outputs:
+                 assert self.speculative_config is not None
+                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
++                # Multimodal wrappers cache the language model's intermediate
++                # tensor factory during construction. The aux-layer setter
++                # expands that inner factory, so refresh the wrapper reference.
++                if hasattr(self.model, "get_language_model"):
++                    language_model = self.model.get_language_model()
++                    aux_layers = get_eagle3_aux_layers_from_config(
++                        self.speculative_config
++                    )
++                    if aux_layers and hasattr(
++                        language_model, "set_aux_hidden_state_layers"
++                    ):
++                        language_model.set_aux_hidden_state_layers(aux_layers)
++                    self.model.make_empty_intermediate_tensors = (
++                        language_model.make_empty_intermediate_tensors
++                    )
+             if isinstance(self.speculator, DraftModelSpeculator):
+                 self.speculator.load_model(self.model)
+                 eplb_models_added = self.eplb.maybe_register_speculator(
+--- a/v1/worker/gpu/spec_decode/dflash/speculator.py
++++ b/v1/worker/gpu/spec_decode/dflash/speculator.py
+@@ -139,6 +139,12 @@
+ 
+     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+         wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
++        if os.environ.get("VLLM_DFLASH_CUDAGRAPH", "1") == "0":
++            wants_full = False
++            logger.warning(
++                "%s CUDA graphs disabled; running the draft eagerly.",
++                self._speculator_name,
++            )
+         supports_full = (
+             self.attn_cg_support.min_cg_support.value
+             >= AttentionCGSupport.UNIFORM_BATCH.value
+@@ -356,6 +362,7 @@
+         skip_attn_for_dummy_run: bool = False,
+         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+         is_profile: bool = False,
++        intermediate_tensors: Any | None = None,
+     ) -> torch.Tensor:
+         num_reqs = input_batch.num_reqs
+         # What the step that just ran actually produced per request: num_sampled counts the
+--- a/v1/worker/gpu/spec_decode/dflash/utils.py
++++ b/v1/worker/gpu/spec_decode/dflash/utils.py
+@@ -49,18 +49,19 @@
+     target_inner = target_language_model.model
+     draft_inner = dflash_model.model
+ 
+-    # Skip embedding sharing under PP — each rank owns its own embedding.
+-    if get_pp_group().world_size == 1:
+-        target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
+-            target_inner, "embedding", None
+-        )
+-        draft_embed = getattr(draft_inner, "embed_tokens", None)
+-        if target_embed is not None and _should_share(
+-            dflash_model, "has_own_embed_tokens", draft_embed, target_embed
+-        ):
+-            if draft_embed is not None:
+-                del draft_inner.embed_tokens
+-            draft_inner.embed_tokens = target_embed
++    # The complete DFlash drafter lives on the last PP rank. Qwen keeps a
++    # local target embedding module on that rank, so it can be shared just as
++    # in the non-PP case (and avoids a duplicate multi-GiB BF16 table).
++    target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
++        target_inner, "embedding", None
++    )
++    draft_embed = getattr(draft_inner, "embed_tokens", None)
++    if target_embed is not None and _should_share(
++        dflash_model, "has_own_embed_tokens", draft_embed, target_embed
++    ):
++        if draft_embed is not None:
++            del draft_inner.embed_tokens
++        draft_inner.embed_tokens = target_embed
+ 
+     target_lm_head = get_target_lm_head(target_model, target_language_model)
+     draft_lm_head = getattr(dflash_model, "lm_head", None)

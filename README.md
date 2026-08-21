@@ -15,7 +15,14 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) with a verify block the context fills |
 
 Both modes share one install — the mode is just which launch script you run.
-Speculation wins below ~8 concurrent users, plain batching above. Numbers are
+An experimental heterogeneous two-GPU path for an RTX 5070 Ti + RTX 3060 is
+in [heterogeneous/](heterogeneous/). Its uneven pipeline-parallel MTP mode is
+runtime-tested at about 84 tok/s single-stream. Its frozen stable profile uses
+a 140k context limit with measured 146,847-token KV capacity (up from 32.6
+tok/s on its conservative non-speculative baseline); separate 32k and 65k
+profiles are available for experiments. An experimental DFlash2+PP 32k profile
+reached **91.7 tok/s** on eight realistic prompts and passed the 12/12 API smoke
+suite. The general numbers below are
 `vllm bench serve` on an RTX 3090 at a 250 W power limit. If the card is yours
 alone, the fastest configuration is three environment variables away:
 [If you are the only user](#if-you-are-the-only-user-do-this).
@@ -235,6 +242,7 @@ and follow its README:
 
 - **[batch/](batch/)** — throughput. `bash batch/start_qwen.sh`
 - **[single-user/](single-user/)** — latency. `bash single-user/start_qwen.sh`
+- **[heterogeneous/](heterogeneous/)** — experimental RTX 5070 Ti + RTX 3060 pipeline-parallel serving. `bash heterogeneous/start_qwen.sh`
 
 First start takes a few minutes (torch.compile, CUDA graph capture, flashinfer
 JIT). Test it:
@@ -268,7 +276,8 @@ perplexity / GSM8K rows.
 | [docs/quality.md](docs/quality.md) | IFBench, perplexity and GSM8K per configuration. |
 | [docs/docker.md](docs/docker.md) | The container image, and an independent WSL2 reproduction. |
 | [docs/long-context.md](docs/long-context.md) | 262k context with the KVarN 4/2-bit KV cache, what vLLM's own per-token-head KV modes are worth here, and how to run the DFlash2 drafter past 64k (`CTX=long`, 114-139k — worth it only for context reproduction). |
-| [batch/](batch/) · [single-user/](single-user/) | The two serving modes: full benchmark tables, every env knob, systemd units. |
+| [batch/](batch/) · [single-user/](single-user/) | The two single-GPU serving modes: full benchmark tables, every env knob, systemd units. |
+| [heterogeneous/](heterogeneous/) | Experimental uneven pipeline-parallel mode for an RTX 5070 Ti + RTX 3060, with compatibility research and limitations. |
 | [prepare/](prepare/) | The one-time model-preparation scripts run by [Setup](#setup) (and by `docker compose run --rm prepare`). |
 | [drafter/](drafter/) | How the draft vocabulary, the int4 drafters and the DFlash2 requantization were built — including what did not work. |
 | [kvarn/](kvarn/) | The KVarN 4/2-bit KV cache port. |
