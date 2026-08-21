@@ -21,6 +21,48 @@ vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
 8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the stable
 profile.
 
+## Why this is faster than a two-GPU GGUF setup (and what it costs)
+
+On the **same two cards**, this fork measured **~84 tok/s** stable (up to
+**~159 tok/s** with DFlash2 on reproduction/editing workloads) against **30–40
+tok/s** for a two-GPU unsloth UD-Q5_K_M MTP setup. It is faster for mechanical
+reasons, not luck:
+
+- **Fewer weight bytes per token.** W4A16 Marlin is ~14.7 GB versus ~18.5 GB
+  for Q5_K_M at ~5.5 bpw; at the DRAM-bandwidth regime these cards live in,
+  fewer bytes is directly faster decode — before speculation.
+- **vLLM's pipeline parallelism overlaps the cross-card traffic.** Without
+  P2P, every token moves activations and KV over PCIe; vLLM's async NCCL
+  point-to-point overlaps that with compute, where a GGUF device split
+  serializes more of it.
+- **Speculation amortizes the per-token PCIe/DRAM cost.** MTP-3 lands ~2.8–3.3
+  tokens per verify step and DFlash2 up to ~7 with the lookup drafter, so the
+  cross-card and memory cost is paid once per step instead of once per token.
+- **FP8 KV halves KV traffic** versus the higher-precision KV a Q5 GGUF run
+  keeps.
+- **It is a serving stack, not an inference loop**: CUDA graphs, Triton/
+  FlashAttention kernels for the hybrid-Mamba architecture, per-request
+  metrics, and working Qwen tool calling (12/12 API smoke suite).
+
+The context win is just as large: with Q5 weights the pair has only ~9.5 GB
+left for KV (roughly 20–40k tokens), while this fork's FP8 pool holds
+**146,847 tokens** — 131k+ context is only possible on the vLLM path.
+
+Honest tradeoffs versus the GGUF setup:
+
+- **Quant quality.** 4-bit vs 5.5-bit is a real delta, measured small: IFBench
+  78.3 vs 79.5 unquantized, GSM8K 96.5%, perplexity 8.0943. Speculation is
+  lossless — the quant is the only lossy layer.
+- **Maintenance surface.** vLLM is pinned at 0.27.1 with 15 patches, two of
+  them bespoke to this PP setup; upgrades are projects. GGUF stacks update
+  routinely.
+- **Known workaround.** The DFlash2 drafter runs eagerly
+  (`VLLM_DFLASH_CUDAGRAPH=0`) because its shared quantized LM-head GEMM crashes
+  inside DFlash's private CUDA graph — some speed is left on the table.
+- **Throughput shape.** The 3060 bounds every step and a full 140k request
+  occupies the cache alone; this is a low-latency box, not a many-concurrent-
+  requests box.
+
 ## What changed
 
 - **MTP + pipeline parallelism** — `patches/vllm-pr46994-mtp-pp.patch`, a
