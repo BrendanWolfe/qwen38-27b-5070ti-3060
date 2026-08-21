@@ -1,3 +1,63 @@
+# Fork notes — RTX 5070 Ti + RTX 3060 heterogeneous mode
+
+This is a fork of [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090).
+Everything below the `---` is the upstream README, unchanged. This fork adds an
+experimental **two-GPU pipeline-parallel** path (`heterogeneous/`) that serves
+the same W4A16 Qwen3.8-27B across a 16 GiB RTX 5070 Ti (`sm120`) and a 12 GiB
+RTX 3060 (`sm86`). Pipeline parallelism is used instead of tensor parallelism
+because the cards are unequal and have no P2P path; the 44/20 layer split keeps
+most of the target on the faster card and transfers activations only at the
+stage boundary.
+
+## Two setups
+
+| profile | launcher | KV | context | measured decode |
+|---|---|---|---|---|
+| **stable / general** | `heterogeneous/start_qwen_stable.sh` | FP8 | 140k (146,847-token pool) | **83.8–84.9 tok/s** |
+| **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **91.7 tok/s** |
+
+Both use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
+vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
+8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the stable
+profile.
+
+## What changed
+
+- **MTP + pipeline parallelism** — `patches/vllm-pr46994-mtp-pp.patch`, a
+  backport of upstream PR #46994 (MTP on the V2 runner under PP) plus the
+  hybrid-Mamba int64 `index_fill_` fix PP long prefill needs. It is applied by
+  the normal `patches/*.patch` loop from the README setup.
+- **DFlash2 + pipeline parallelism** — `patches/zz-dflash2-pipeline-parallel.patch`
+  (the `zz-` prefix keeps it last in the patch glob, which matters because it
+  touches files other patches also modify). Upstream 0.27.1 refuses DFlash with
+  PP outright. The patch relays the target's auxiliary hidden states (layers
+  5/19/33 from stage 1, 47/61 from stage 2) across the boundary, validates the
+  complete drafter as PP-local on the last rank, shares the target's embedding
+  table and quantized LM head instead of allocating multi-GiB BF16 temporaries,
+  and adds `VLLM_DFLASH_CUDAGRAPH=0` (the shared Marlin LM head's candidate GEMM
+  crashes inside DFlash's private CUDA graph, so the drafter runs eagerly while
+  the target keeps compilation and graphs).
+- **Launchers** — `heterogeneous/start_qwen.sh` (shared, tunable),
+  `start_qwen_stable.sh` (frozen MTP snapshot), `start_qwen_short.sh`
+  (32k/65k MTP experiments), `start_qwen_dflash2.sh` (32k DFlash2). They encode
+  the host/toolchain fixes this pair needed: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
+  `TORCH_CUDA_ARCH_LIST="8.6;12.0"`, GCC 15 for CUDA 13.3's JIT, unsetting
+  `VLLM_MARLIN_INPUT_DTYPE` for W4A16, `GPU_UTIL=0.91` (0.93 OOMed compiled
+  prefill), process-group cleanup under `setsid`, `NO_API_KEY` mode, and the
+  vLLM flags for accurate per-request metrics and Qwen tool calling.
+- **llama-swap** — the four model entries in
+  `heterogeneous/llama-swap.example.yaml`:
+  `vllm-speed/qwen3.8-27b` (stable), `vllm-speed/qwen3.8-27b-32k`,
+  `vllm-speed/qwen3.8-27b-65k`, `vllm-speed/qwen3.8-27b-dflash2` (unprefixed
+  IDs kept as aliases).
+- **Docker** — a `hetero` compose profile (two-GPU reservation) and a `hetero`
+  entrypoint command.
+
+Full details, benchmarks, the DFlash2 memory-sizing trap, and limitations are
+in [heterogeneous/README.md](heterogeneous/README.md); the two-GPU work is also
+summarised at the end of [docs/optimizations.md](docs/optimizations.md).
+
+---
 # Qwen3.8-27B on one RTX 3090
 
 ![Stock vLLM against this repo, same card, same prompts](docs/media/demo.gif)
@@ -15,14 +75,7 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) with a verify block the context fills |
 
 Both modes share one install — the mode is just which launch script you run.
-An experimental heterogeneous two-GPU path for an RTX 5070 Ti + RTX 3060 is
-in [heterogeneous/](heterogeneous/). Its uneven pipeline-parallel MTP mode is
-runtime-tested at about 84 tok/s single-stream. Its frozen stable profile uses
-a 140k context limit with measured 146,847-token KV capacity (up from 32.6
-tok/s on its conservative non-speculative baseline); separate 32k and 65k
-profiles are available for experiments. An experimental DFlash2+PP 32k profile
-reached **91.7 tok/s** on eight realistic prompts and passed the 12/12 API smoke
-suite. The general numbers below are
+Speculation wins below ~8 concurrent users, plain batching above. Numbers are
 `vllm bench serve` on an RTX 3090 at a 250 W power limit. If the card is yours
 alone, the fastest configuration is three environment variables away:
 [If you are the only user](#if-you-are-the-only-user-do-this).
@@ -242,7 +295,6 @@ and follow its README:
 
 - **[batch/](batch/)** — throughput. `bash batch/start_qwen.sh`
 - **[single-user/](single-user/)** — latency. `bash single-user/start_qwen.sh`
-- **[heterogeneous/](heterogeneous/)** — experimental RTX 5070 Ti + RTX 3060 pipeline-parallel serving. `bash heterogeneous/start_qwen.sh`
 
 First start takes a few minutes (torch.compile, CUDA graph capture, flashinfer
 JIT). Test it:
@@ -276,8 +328,7 @@ perplexity / GSM8K rows.
 | [docs/quality.md](docs/quality.md) | IFBench, perplexity and GSM8K per configuration. |
 | [docs/docker.md](docs/docker.md) | The container image, and an independent WSL2 reproduction. |
 | [docs/long-context.md](docs/long-context.md) | 262k context with the KVarN 4/2-bit KV cache, what vLLM's own per-token-head KV modes are worth here, and how to run the DFlash2 drafter past 64k (`CTX=long`, 114-139k — worth it only for context reproduction). |
-| [batch/](batch/) · [single-user/](single-user/) | The two single-GPU serving modes: full benchmark tables, every env knob, systemd units. |
-| [heterogeneous/](heterogeneous/) | Experimental uneven pipeline-parallel mode for an RTX 5070 Ti + RTX 3060, with compatibility research and limitations. |
+| [batch/](batch/) · [single-user/](single-user/) | The two serving modes: full benchmark tables, every env knob, systemd units. |
 | [prepare/](prepare/) | The one-time model-preparation scripts run by [Setup](#setup) (and by `docker compose run --rm prepare`). |
 | [drafter/](drafter/) | How the draft vocabulary, the int4 drafters and the DFlash2 requantization were built — including what did not work. |
 | [kvarn/](kvarn/) | The KVarN 4/2-bit KV cache port. |
