@@ -191,9 +191,30 @@ if [ "$SPEC" = "dflash2" ]; then
     # KV at 245760 max-model-len with 2 slots (single-user long-context; the
     # graphs stay at the k=7 size).
     MAX_SEQS=${MAX_SEQS:-2}
-    MAX_LEN=${DFLASH_MAX_LEN:-245760}
+    # 221184 rather than 245760 above 7 drafts, the same trade CTX=fast makes at
+    # DFLASH_TOKENS>7. The pinned pool is 4.90 GiB; one request at max_model_len needs
+    # 5.16 GiB at k=15, so the server refuses to start at 245760 -- "5.16 GiB KV cache is
+    # needed, which is larger than the available KV cache", which is the boot failure an
+    # independent 3090 Ti reported (PR #13). Raising the cudagraph reservation does NOT
+    # fix this and I checked: KV_MEM is pinned, so the pool does not grow when graph
+    # memory is accounted differently. 221184 = 1728 x 128 leaves ~2.6% margin (229376 was still 1% short).
+    if [ "$DRAFT_TOKENS" -gt 7 ]; then
+      MAX_LEN=${DFLASH_MAX_LEN:-221184}
+    else
+      MAX_LEN=${DFLASH_MAX_LEN:-245760}
+    fi
     KV_MEM=${KV_MEM-5261334938}
-    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+    # Above 7 drafts the decode graphs are captured for BOTH block lengths, which is
+    # ~1.8 GiB rather than ~1.45 -- the same arithmetic CTX=long and CTX=fast already
+    # branch on. This branch did not, and said so in a comment ("the graphs stay at the
+    # k=7 size") that stops being true the moment anyone sets DFLASH_TOKENS. The pool is
+    # then sized as if that memory were free and the server does not come up at 240k on
+    # 24 GB, which is what an independent 3090 Ti report hit (PR #13).
+    if [ "$DRAFT_TOKENS" -gt 7 ]; then
+      export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1900}
+    else
+      export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+    fi
   elif [ "$CTX" = "long" ]; then
     # int8 KV: measured 136,429 tokens of pool at DFLASH_TOKENS=7 with prefix caching on
     # (138,696 without), against bf16's 69,758 in the same pinned 5.2 GiB. DFLASH_TOKENS>7
@@ -278,7 +299,18 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   #   PIECEWISE 93.5 / 83.8 / 70.3 / 59.6 tok/s
   # so PIECEWISE now covers the whole of CTX=huge, not just dflash2. The old
   # claim here that forcing it "would cost decode for nothing" was wrong twice.
-  [ "$CTX" = "huge" ] &&
+  # Post-fix the capture default splits by speculator, on measurement rather than on
+  # the theory that used to live here. Both are CORRECT under FULL now (5 residues each,
+  # cold and self-hit, byte-identical), so this is purely quality and speed:
+  #   SPEC=dflash2 k=7   FULL 96.5% GSM8K   PIECEWISE 95.0%   -> FULL, and it is worth
+  #                      2-3x under GPU passthrough (PR #13), where the uncaptured
+  #                      verify is launch-bound rather than bandwidth-bound
+  #   SPEC=mtp           FULL 93.5% GSM8K   PIECEWISE 96.0%   -> PIECEWISE, since FULL
+  #                      is worse on quality and no faster (87.8/86.1/70.4/63.5 against
+  #                      93.5/83.8/70.3/59.6 over 8k/16k/32k/50k)
+  # n=200 each, so the quality gaps are about one standard error; the asymmetry in the
+  # decision comes from the SPEED evidence, which only exists for dflash2.
+  [ "$CTX" = "huge" ] && [ "$SPEC" != "dflash2" ] &&
     CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
 fi
 
