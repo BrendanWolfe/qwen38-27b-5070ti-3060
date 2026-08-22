@@ -316,9 +316,11 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # residue 82% of the time. a75ee4b fixed the same shape for dflash2 but does not
   # cover this path.
   #
-  # dflash2 does get FULL, on quality and speed: FULL 96.5% GSM8K against PIECEWISE
-  # 95.0%, and worth 2-3x under GPU passthrough (PR #13), where the uncaptured verify
-  # is launch-bound rather than bandwidth-bound. That one IS a preference and may be
+  # dflash2 does get FULL, and to the same evidence standard: ALL 128 residues swept
+  # under FULL, self-hit measured, 0 broken -- so this is not the five-sample luck the
+  # mtp claim was. On top of that FULL is 96.5% GSM8K against PIECEWISE's 95.0%, and
+  # worth 2-3x under GPU passthrough (PR #13), where the uncaptured verify is
+  # launch-bound rather than bandwidth-bound. THAT one is a preference and may be
   # revisited; the mtp line above may not, until the empty answer at residue 4 is gone.
   [ "$CTX" = "huge" ] && [ "$SPEC" != "dflash2" ] &&
     CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
