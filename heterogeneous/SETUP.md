@@ -10,7 +10,7 @@ Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
 | `start_qwen_dflash2.sh` | DFlash2, long context | **88k** (97,962-token pool) | FP8 | **~85 tok/s**, acceptance 3.26 |
 | `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
 
-Everything is driven by this fork (`BrendanWolfe/qwen38-27b-rtx3090`) of
+Everything is driven by this fork (`BrendanWolfe/qwen38-27b-5070ti-3060`) of
 [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090) —
 the upstream repo does **not** contain the two-GPU patches. The model
 preparation below follows the upstream setup; the run/verify steps are the
@@ -43,7 +43,7 @@ If your 3060 is slot 0, either move the cards or launch with
 ## 1. Clone this fork and create the venv
 
 ```bash
-git clone https://github.com/BrendanWolfe/qwen38-27b-rtx3090 ~/qwen-serving
+git clone https://github.com/BrendanWolfe/qwen38-27b-5070ti-3060 ~/qwen-serving
 cd ~/qwen-serving
 
 python3.12 -m venv venv
