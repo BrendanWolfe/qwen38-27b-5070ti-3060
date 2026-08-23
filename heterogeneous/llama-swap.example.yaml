@@ -23,13 +23,25 @@
     unloadTimeout: 60
   "vllm-speed/qwen3.8-27b-dflash2":
     name: "Qwen3.8 27B 32k (experimental DFlash2 profile)"
-    description: "Experimental FP8-KV/DFlash2 profile, 88k context, PP auxiliary-state relay; needs prepare/fetch_dflash2.py first."
+    description: "DFlash2, 88k context, FP8 KV, 97,962-token pool, 85.8 tok/s; needs prepare/fetch_dflash2.py first."
     aliases:
       - "qwen3.8-27b-dflash2"
     useModelName: "qwen3.8-27b"
     cmd: |
       /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
       /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_dflash2.sh
+    checkEndpoint: /health
+    ttl: 900
+    unloadTimeout: 60
+  "vllm-speed/qwen3.8-27b-dflash2-fast":
+    name: "Qwen3.8 27B 32k (DFlash2, reversed pipeline, fastest decode)"
+    description: "Drafter and LM head on the 5070 Ti: 97.2 tok/s, the quickest profile on this pair. BF16 KV, 32k context only."
+    aliases:
+      - "qwen3.8-27b-dflash2-fast"
+    useModelName: "qwen3.8-27b"
+    cmd: |
+      /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
+      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_dflash2_fast.sh
     checkEndpoint: /health
     ttl: 900
     unloadTimeout: 60

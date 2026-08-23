@@ -176,7 +176,8 @@ under `models:`. The entries:
 
 - `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`);
   keeps `vllm-speed/qwen3.8-27b` as an alias so existing clients keep working
-- `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
+- `vllm-speed/qwen3.8-27b-dflash2` — DFlash2, 88k context (`start_qwen_dflash2.sh`)
+- `vllm-speed/qwen3.8-27b-dflash2-fast` — DFlash2 reversed pipeline, 32k at 97 tok/s
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 
 `start_qwen_huge.sh` is not wired in by default; add it the same way if you want

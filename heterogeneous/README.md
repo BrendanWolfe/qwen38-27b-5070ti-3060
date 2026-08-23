@@ -587,7 +587,8 @@ what runs on the origin host):
 - `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`),
   aliased from `vllm-speed/qwen3.8-27b`
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
-- `vllm-speed/qwen3.8-27b-dflash2` — experimental 32k DFlash2
+- `vllm-speed/qwen3.8-27b-dflash2` — DFlash2, 88k context
+- `vllm-speed/qwen3.8-27b-dflash2-fast` — DFlash2 reversed pipeline, 32k at 97 tok/s
   (`start_qwen_dflash2.sh`)
 
 Each entry launches through `/usr/bin/env PORT='${PORT}' NO_API_KEY=1` (the
