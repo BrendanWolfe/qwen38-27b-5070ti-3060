@@ -413,6 +413,25 @@ else
   VISION_ARGS="--language-model-only"
 fi
 
+# fp16 activations do not work with the speculative path, and every way of finding
+# that out is late and cryptic (#27): the split-KV verify kernel hardcodes
+# tl.bfloat16 for the query cast and the dot accumulate
+# (patches/spec-decode-attn.patch), so it fails to *compile* at first attention with
+# "Both operands must be same dtype. Got bf16 and fp16"; disable it with SPEC_ATTN=0
+# and you get as far as the first sample, where the rejection sampler dies on a
+# device-side assert. Neither message names the dtype you set. Say so here instead.
+# This is a limitation of this repo's kernels, not of the checkpoint -- an fp16
+# target is fine with SPEC=none.
+case " ${EXTRA_ARGS:-} " in
+  *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
+    if [ "${SPEC:-mtp}" != "none" ]; then
+      echo "--dtype float16 needs SPEC=none: this repo's speculative kernels are bf16-only." >&2
+      echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
+      echo "  and the rejection sampler asserts device-side under fp16. See issue #27." >&2
+      exit 1
+    fi ;;
+esac
+
 export PATH="$REPO/venv/bin:$PATH"
 # expandable_segments needs CUDA VMM, which WSL2's paravirt driver rejects during
 # Marlin repack. It is the single most reported failure on Windows (#2, #26) and it
