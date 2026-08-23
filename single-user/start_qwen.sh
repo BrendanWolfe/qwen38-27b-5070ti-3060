@@ -431,21 +431,30 @@ else
   VISION_ARGS="--language-model-only"
 fi
 
-# fp16 activations do not work with the speculative path, and every way of finding
-# that out is late and cryptic (#27): the split-KV verify kernel hardcodes
-# tl.bfloat16 for the query cast and the dot accumulate
-# (patches/spec-decode-attn.patch), so it fails to *compile* at first attention with
-# "Both operands must be same dtype. Got bf16 and fp16"; disable it with SPEC_ATTN=0
-# and you get as far as the first sample, where the rejection sampler dies on a
-# device-side assert. Neither message names the dtype you set. Say so here instead.
-# This is a limitation of this repo's kernels, not of the checkpoint -- an fp16
-# target is fine with SPEC=none.
+# fp16 activations do not work with the speculative path, and the way you find that out
+# is late and cryptic (#27): the split-KV verify kernel hardcodes tl.bfloat16 for the
+# query cast and the dot accumulate (patches/spec-decode-attn.patch:217,236), so it
+# fails to *compile* at first attention with "Both operands must be same dtype. Got bf16
+# and fp16" -- a triton CompilationError that never names the dtype you set.
+#
+# Scope, stated honestly because an earlier version of this comment overreached: the
+# BLOCKER I can point at is that kernel. @ahnguyen17 also hit a device-side assert in
+# rejection_sample() with SPEC_ATTN=0, and I first wrote that up as a second bf16
+# assumption -- it is not. rejection_sampler_utils.py contains zero bf16/fp16 literals;
+# it promotes to tl.float32 on load and allocates its buffers float32/int64, so it is
+# dtype-agnostic. That assert has some other cause (it was seen on a w8a16 GPTQ target
+# whose GEMM path was already suspect, and a device-side assert reads like an
+# out-of-bounds index, not a dtype mismatch), and it is not established.
+#
+# So this refuses the combination rather than claiming to enumerate why it breaks:
+# fp16 + a speculator is untested here and its default path is bf16-only. SPEC=none is
+# the escape hatch -- a limitation of these kernels, not of any checkpoint.
 case " ${EXTRA_ARGS:-} " in
   *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
     if [ "${SPEC:-mtp}" != "none" ]; then
-      echo "--dtype float16 needs SPEC=none: this repo's speculative kernels are bf16-only." >&2
+      echo "--dtype float16 needs SPEC=none: this repo's speculative path is bf16-only." >&2
       echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
-      echo "  and the rejection sampler asserts device-side under fp16. See issue #27." >&2
+      echo "  so it fails to compile at the first attention. See issue #27." >&2
       exit 1
     fi ;;
 esac
