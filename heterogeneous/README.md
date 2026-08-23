@@ -6,14 +6,24 @@ consumer GPUs**: a 16 GiB RTX 5070 Ti (`sm120`, CUDA logical device 0) and a
 repository's fast model variant, and both speculative decoders (MTP and
 DFlash2).
 
-Two setups are supported:
+Four setups are supported:
 
 | profile | launcher | speculation | KV | context | measured decode |
 |---|---|---|---|---|---|
-| stable / general | `start_qwen_stable.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (146,847-token pool) | **83.8-84.9 tok/s** |
+| stable / general | `start_qwen_stable.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (155,978-token pool) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
+| fast / short | `start_qwen_fast.sh` | MTP-3, reversed pipeline | FP8 | 32k (33,363-token pool) | **78.7-82.6 tok/s** |
 | short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
+| huge context | `start_qwen_huge.sh` | MTP-3, int4 per-token-head KV | int4 | **262k** (284,234-token pool) | batch only — ~112 tok/s prefill at depth |
+| fastest DFlash2 | `start_qwen_dflash2_fast.sh` | DFlash2-7, reversed 24/40 | bf16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 
-`start_qwen.sh` is the shared, tunable launcher both profiles wrap.
+`start_qwen.sh` is the shared, tunable launcher every profile wraps.
+
+The stable profile's headline number is quoted two ways in this file because
+both are true and they answer different questions. A single stream decodes at
+73.6-75.5 tok/s on eight mixed realistic prompts (`bench/real_rep.sh`); an
+earlier repeated-512-token measurement read 83.8-84.9 on easier text. Four
+concurrent streams total 210 tok/s, because a pipeline only overlaps when
+there is more than one request in it — see "Concurrency" below.
 
 ## Why pipeline parallelism
 
@@ -26,7 +36,30 @@ activations only at the stage boundary.
 The `44,20` split (`VLLM_PP_LAYER_PARTITION`) keeps 44 target layers on the
 faster/larger 5070 Ti and 20 layers plus the drafter on the 3060. A tested
 `46,18` split reduced the KV pool from ~160k to ~132k tokens with no speed
-gain, so `44,20` remains the default.
+gain, so `44,20` remains the default. Why moving two layers changed nothing,
+and what does move the number, is in "Where the step time goes" below.
+
+### The 3060 is on a PCIe x1 link
+
+On this host the small card is in an x1-wired slot:
+
+```
+$ cat /sys/bus/pci/devices/0000:07:00.0/{current,max}_link_width
+1
+16
+```
+
+(The 5070 Ti at `0000:01:00.0` reports 16/16. Both report 2.5 GT/s at idle;
+link *speed* trains up under load, link *width* does not.)
+
+This is worth knowing and is not currently a bottleneck. A decode step moves
+about 160 KB across the boundary — hidden states and residual for the ~8 tokens
+in flight — which is microseconds even at ~1 GB/s. A 2,048-token prefill chunk
+moves ~42 MB, so the 130,916-token request pays roughly 3 s of link time inside
+its 165 s. The link does cap things worth wanting later: raising
+`--max-num-batched-tokens` above 2048 to cut long-prompt TTFT, and the
+five-tensor auxiliary relay DFlash2 needs during prefill. If a wider slot is
+free, use it; nothing here depends on it.
 
 ## Everything that was modified to make this work
 
@@ -38,8 +71,16 @@ gain, so `44,20` remains the default.
   stable llama-swap model, so later experiments cannot change its behavior.
 - `heterogeneous/start_qwen_dflash2.sh` — 32k DFlash2 profile (BF16 KV,
   manually sized cache, eager drafter; see below).
+- `heterogeneous/start_qwen_fast.sh` — 32k reversed-pipeline MTP profile
+  (LM head and drafter on the 5070 Ti; 7.7% quicker per step).
+- `heterogeneous/start_qwen_huge.sh` — 262k int4 per-token-head KV profile.
+- `heterogeneous/start_qwen_dflash2_fast.sh` — reversed-pipeline FP8 DFlash2;
+  strictly better than `start_qwen_dflash2.sh`.
 - `heterogeneous/llama-swap.example.yaml` — the two llama-swap model entries.
 - `patches/vllm-pr46994-mtp-pp.patch` — MTP + pipeline parallelism (below).
+- `patches/vllm-pr52297-gdn-common-metadata.patch` — upstream PR #52297,
+  backported. No measurable speed change here, but +6.2% KV pool; see
+  "Where the step time goes".
 - `patches/zz-dflash2-pipeline-parallel.patch` — DFlash2 + pipeline
   parallelism (below). The `zz-` prefix keeps it last in the `patches/*.patch`
   glob because it touches files earlier patches also patch.
@@ -206,6 +247,281 @@ when the model is quoting, editing, or copying — the 106–159 t/s rows. The
 as the midpoint of a workload-shaped range, with the high end on reproduction
 and editing.
 
+## Where the step time goes
+
+Every number in this section is `bench/real_rep.sh` — eight mixed realistic
+prompts, 1,024 output tokens each, one at a time, three repeats. It reports
+**ms per model step** and **tokens per step**, which is what to compare when
+two configurations look close: end-to-end tok/s drifts between sessions,
+ms/step does not.
+
+The model is dense (27B, 64 layers, no experts), so a decode step reads every
+weight. That makes the step time predictable from bandwidth alone. Quantized
+weights are ~14.7 GB, ~0.21 GB per layer, plus ~0.64 GB each for the
+248,320-entry embedding table and LM head. The 5070 Ti runs at ~896 GB/s and
+the 3060 at ~360 GB/s, and **at concurrency 1 a pipeline does not overlap** —
+rank 0 runs, then rank 1 runs, so the step is the sum of the two stages:
+
+| stable profile, per decode step | bytes read | at that card's bandwidth |
+|---|---:|---:|
+| 5070 Ti (rank 0): 44 target layers + embedding | 9.9 GB | 11.0 ms |
+| 3060 (rank 1): 20 target layers | 4.2 GB | 11.7 ms |
+| 3060: 248k-vocab LM head, verify pass | 0.64 GB | 1.8 ms |
+| 3060: 3 chained MTP passes (layer + draft head) | ~0.96 GB | 2.7 ms |
+| **modelled total** | | **~27 ms** |
+| measured | | **35.2 ms** |
+
+Two things fall out of that table. The first is that the 3060 holds a third of
+the model and accounts for roughly **16 of the 27 modelled milliseconds**,
+because vLLM puts the LM head, the sampler and the MTP drafter on the *last*
+pipeline rank and that was the slow card. The second is that ~8 ms of the
+measured step is neither weight reads nor bandwidth inefficiency — it is
+speculation overhead: rejection sampling, the multi-query verify attention,
+the draft loop, and per-step metadata.
+
+This also explains the `46,18` result. Moving two layers to the fast card is
+worth 2 x 0.35 = 0.7 ms, about 2%, which is inside the noise — while costing
+28k tokens of pool. The split was never the lever; *what sits on the last
+rank* is.
+
+### What this round of tuning actually changed
+
+| change | ms/step | tok/step | KV pool | verdict |
+|---|---:|---:|---:|---|
+| stable 140k, as shipped | 35.2 | 2.54-2.58 | 146,847 | baseline |
+| + PR #52297 (GDN metadata hoist) | 35.1 | 2.54-2.58 | **155,978** | no speed change; +6.2% pool |
+| + reversed pipeline, 32k | **32.4** | 2.51-2.62 | 33,363 | -7.7% step time, -78% pool |
+
+**PR #52297 does not speed this machine up.** Upstream measured +61% output
+tok/s at concurrency 1 on Qwen3.6-35B-A3B + DFlash on an H200, from cutting
+`GDNAttentionMetadataBuilder.build()` from ~900us to ~300us per cache group.
+That is a fixed CPU-side saving, and it lands against a GPU step three times
+longer here, on a 9800X3D that is not the bottleneck, with async scheduling
+already hiding part of it. Measured: 35.2 -> 35.1 ms/step, 0.3%, with
+byte-identical tokens per step.
+
+It is still worth keeping, for a reason nobody predicted: hoisting the
+per-group tensors out of `build()` lowers the profiled peak activation, so the
+KV pool grows from 146,847 to **155,978 tokens** — 9,131 tokens of extra
+context for free. `patches/vllm-pr52297-gdn-common-metadata.patch` documents
+the backport; the hoisted helper is verified against the 0.27.1 inline code
+over 4,002 random batches.
+
+**Reversing the pipeline is worth 7.7%.** `GPU_IDS=1,0 PP_LAYERS=20,44` gives
+each card the same number of target layers as before — and therefore the same
+11/5 split of full-attention layers and the same KV bytes per token — but
+makes the 5070 Ti the last rank, so the LM head, the sampler and the MTP
+drafter move onto it. 35.1 -> 32.4 ms/step, 73.6-75.5 -> 78.7-82.6 tok/s,
+tokens per step unchanged. That is `start_qwen_fast.sh`.
+
+It cannot become the stable profile, because the last rank also carries the
+sampling and logits peak — 1.24 GiB against the first rank's 0.32 GiB — so the
+5070 Ti gives up ~3.15 GiB of KV (4.23 -> 1.08 GiB) and the pool collapses to
+33,363 tokens. At `MAX_LEN=100000` it will not start at all. The 3060 idles at
+6.5 GiB of its 12 GiB in this arrangement, which is the honest description of
+the trade: the pair's memory is used worse so that its bandwidth is used
+better.
+
+### Concurrency
+
+Pipeline parallelism exists to overlap stages, and at one request it cannot.
+Measured on the stable profile, 512 output tokens, `vllm bench serve`:
+
+| concurrency | aggregate output tok/s | vs C1 | mean ITL | mean TTFT |
+|---|---:|---:|---:|---:|
+| 1 | 73.0 | 1.00x | 34.6 ms | 170 ms |
+| 2 | 115.7 | **1.58x** | 40.8 ms | 225 ms |
+| 4 | 213.9 | **2.93x** | 43.6 ms | 325 ms |
+| 6 | 258.4 | **3.54x** | 56.4 ms | 389 ms |
+| 8 | 301.0 | **4.12x** | 61.2 ms | 438 ms |
+
+Concurrency is the largest free win on this pair and it needs no patch: an
+agent or editor that issues parallel calls gets most of it automatically. Note
+what it does *not* say — a single stream is not faster, and the earlier
+finding that `MAX_SEQS=1` buys nothing (75.25 against 75.45 tok/s) still
+stands, because that experiment only ever ran one request at a time.
+
+**The slot count was the binding limit, so the default is now `MAX_SEQS=8`.**
+The C1-C4 rows above reproduce the earlier four-slot measurements almost
+exactly (73.1 / 120.8 / 212.7 at four slots), so eight slots change nothing
+about how the server behaves at low load; they only add the C6 and C8 rows,
+which were previously unreachable. That is +41% aggregate throughput at eight
+streams for free. Decode here is bound by weight bandwidth, not by math, so
+additional sequences ride along in a step that was already reading every
+weight.
+
+Nothing else gated it. `max_concurrent_batches` is already 3 (PP=2 plus async
+scheduling on the V2 runner, `config/vllm.py`), `max_cudagraph_capture_size` is
+derived as `MAX_SEQS * (DRAFT_TOKENS + 1)` so the captured shapes grow with the
+ceiling, and `long_prefill_token_threshold` is 0 with decode tokens placed in
+the batch ahead of prefill chunks, so concurrent streams are not starved by one
+long prefill. The GDN recurrent state — which `docs/optimizations.md` records
+as the real concurrency bound on this architecture — is already handled by
+`--mamba-ssm-cache-dtype float16` in the launch command.
+
+The measured cost of the higher ceiling is CUDA graph memory: 0.13 -> 0.14 GiB,
+about 1.3k tokens of pool. It is *not* responsible for the pool varying between
+starts. That swing is rank 1's profiled activation peak, which comes out at
+either 0.32 GiB or 1.24 GiB (the sampling/logits peak) depending on the draw,
+and it happens at four slots too — six repeated starts gave 184,130 tokens
+three times out of three at four slots and 146,847 / 157,500 / 184,130 / 184,130
+at eight. Every draw still clears the 140,000 the profile requires, but pin
+`--kv-cache-memory` before comparing pools across configurations.
+
+Past eight the curve flattens and latency does not, which is why 8 and not 16
+is the default. At `MAX_SEQS=16`: C8 is 309.5 tok/s (the same as eight slots,
+within noise), C12 is 341.6 for 82.0 ms ITL, and C16 is 385.2 but with mean
+TTFT at **2,955 ms** as 64 prompts queue behind a 2,048-token prefill budget.
+`MAX_SEQS=16` is the right override for batch or throughput work, where TTFT
+does not matter; it costs nothing at low load.
+
+### 262k, the full native context
+
+`--kv-cache-dtype int4_per_token_head --attention-backend TRITON_ATTN` holds a
+**284,234-token pool** at `MAX_LEN=262144`, against FP8's 155,978. The binding
+rank is the 5070 Ti with 11 of the 16 full-attention layers; int4 per-token-head
+is about half FP8's 2 KB per token per layer, which is the whole trick. MTP,
+pipeline parallelism, the V2 model runner and the Triton backend all start
+together, which was the open question — the repo's earlier
+`int4_per_token_head` results were batch-mode on the V1 runner with no
+speculation.
+
+The cost is prefill, and it is much larger than "somewhat slower". Measured on
+this pair, with the KV pool as the clock:
+
+| prompt | prefill rate | wall time |
+|---|---|---|
+| 32k | ~840 tok/s | 38.2 s end to end, needle **PASS** |
+| ~225k (instantaneous) | **~112 tok/s** | ~4,460 tokens per 40 s |
+
+At that depth a full 240k prompt takes roughly **35 minutes** before the first
+token, so the profile is a batch tool, not an interactive one. A 240k needle
+run was started and abandoned partway through the first depth for exactly that
+reason: the rate is the answer, and confirming recall would have cost another
+hour of GPU time. What is verified is that the profile boots with a
+284,234-token pool, generates correctly, and passes a 32k needle; **recall
+beyond 32k is unverified here.**
+
+Use `start_qwen_stable.sh` as the general server and switch to this only when a
+request will not fit, and only when you can wait.
+
+KVarN (`kvarn/`, `CTX=huge` in single-user mode) is denser still — ~840 B per
+token per layer against int4 per-token-head's ~1 KB — but it has never been run
+on the V2 model runner that MTP+PP requires, and its builder-owner registry is
+written against the V1 metadata path. That is the next thing to try for this
+profile, not a drop-in.
+
+### DFlash2: KV dtype, pipeline order and where the layers go
+
+The shipped DFlash2 profile assumed BF16 KV. That assumption was never tested
+and it is wrong; testing it turned up two further effects that matter more. All
+rows are `bench/real_rep.sh`, 3 reps, 8 realistic 1,024-token prompts at
+concurrency 1, pool pinned via `--kv-cache-memory`.
+
+| order | KV | backend | graphs | ms/step | tok/step | e2e tok/s | pool |
+|---|---|---|---|---|---|---|---|
+| forward 44/20 | BF16 | FlashAttn | full | 37.5 | 3.13–3.23 | 83.4–86.0 | 33,506 |
+| forward 44/20 | FP8 | FlashInfer | piecewise | 38.5 | 3.12–3.22 | 81.1–83.5 | 53,683 |
+| forward 44/20 | int8pth | Triton | full | 37.6–37.9 | 3.03–3.19 | 80.4–84.8 | 52,986 |
+| reversed 26/38 | FP8 | FlashInfer | piecewise | 36.6 | 3.23–3.31 | 88.3–90.4 | **56,704** |
+| reversed 24/40 | FP8 | FlashInfer | piecewise | 35.5 | 3.04–3.21 | 88.1–92.9 | 45,085 |
+| reversed 26/38 | BF16 | FlashAttn | full | 34.9 | 3.13–3.53 | 92.5–104.3 | 35,277 |
+| **reversed 24/40** | **BF16** | FlashAttn | full | **33.9–34.0** | 3.15–3.27 | **95.2–98.8** | 34,539 |
+| reversed 24/40 | int8pth | Triton | full | **34.1–34.6** | 3.12–3.29 | 93.5–99.6 | 44,387 |
+| reversed 20/44 | FP8 | FlashInfer | piecewise | 33.8–34.0 | 3.01–3.29 | 89.0–96.6 | 17,497 |
+| reversed 20/44 | int8pth | Triton | full | 32.6 | 3.08–3.26 | 97.4–103.2 | 18,770 |
+| reversed 16/48 † | int8pth | Triton | full | **30.3–30.6** | 2.94–3.09 | 98.6–104.2 | 10,436 |
+
+† `DFLASH_TOKENS=5 MAX_SEQS=2`, `MAX_LEN=8192` — see the memory note below.
+
+Four things follow.
+
+**Reversal pays roughly twice as much for DFlash2 as for MTP** — −12.6% step
+time at 20/44 against MTP's −7.7%. That is the drafter: DFlash2's is ~1.2 GiB
+and runs eagerly because its private CUDA graph is disabled, so leaving it on
+the 3060 costs more than MTP's three small chained passes. (Re-enabling that
+graph with `VLLM_DFLASH_CUDAGRAPH=1` now starts without the Marlin failure the
+flag was added for, and is worth nothing: 36.5 ms against 36.6 over 3 reps.)
+
+**The fewest layers the 3060 can hold is the fastest split.** At concurrency 1 a
+pipeline does not overlap, so the step is the *sum* of the stages. A layer on
+the 3060 costs 0.21 GB / 0.360 GB/s = 0.58 ms and saves only 0.21 / 0.896 =
+0.23 ms on the 5070 Ti, so moving one off is worth ~0.35 ms in theory and 0.48
+measured (24 → 20 → 16). Nothing about the split balances; it is monotone, and
+the only limit is 5070 Ti memory. That limit bites twice, because the
+full-attention layers are every 4th one: at 24/40 the 5070 Ti holds 10 of the
+16, at 16/48 it holds 12, so KV cost per token rises as the split falls. Hence
+the pool collapsing 45,085 → 18,770 → 10,436 while the step time drops. The
+memory to attack is the aligned recurrent-state page, which scales with the
+verify block (`DFLASH_TOKENS`) and *not* with `MAX_SEQS` — gotcha 33. Dropping
+`DFLASH_TOKENS` 7 → 5 is what makes the 16/48 row start at all.
+
+**FP8 KV silently costs you full CUDA graphs under speculative decoding.** This
+is why the int8pth rows beat their FP8 neighbours, and it is not about density.
+Under spec-decode vLLM consults the attention backend's `AttentionCGSupport`:
+FlashInfer reports `UNIFORM_SINGLE_TOKEN_DECODE`, so the mode is downgraded —
+every FP8 server log contains *"CUDAGraphMode.FULL_AND_PIECEWISE is not
+supported with spec-decode for attention backend FlashInferBackend; setting
+cudagraph_mode=PIECEWISE"* — while `TRITON_ATTN` reports `ALWAYS` and keeps
+full graphs. FlashAttention cannot do FP8 on these cards (*"FP8 KV cache
+requires FA3 on SM90 or FA4 on SM100"*; they are sm120 and sm86) and Triton
+cannot either (native `fp8e4nv` needs SM89+, the 3060 is sm86), so
+`int8_per_token_head` is the only dense-KV mode that keeps full graphs on
+**both** cards. It works here only because the repo already carries
+`hybrid-sw-block-promote.patch` (without it int8 KV costs *more* memory than
+bf16) and `spec-decode-int8-kv.patch`.
+
+**But int8pth trades prefill for decode, and the trade gets worse with depth.**
+Measured at the 24/40 split:
+
+| prompt depth | FP8 | int8pth | BF16 |
+|---|---|---|---|
+| 4,251 | 1075 tok/s | 1010 tok/s | **1141 tok/s** |
+| 16,804 | 1167 tok/s | 932 tok/s | **1181 tok/s** |
+| 29,355 | **1016 tok/s** | 715 tok/s | 1008 tok/s |
+
+int8pth's decode win is ~0.36 ms per output token, so it only repays that TTFT
+cost after roughly 700 output tokens at a 4k prompt, 10,000 at 17k and 34,000 at
+29k. (Its quality is fine — GSM8K 96.0% at 24/40, n=200 greedy, against the
+repository's 96.0–96.5% baseline — the problem is purely prefill.)
+
+**BF16 is the answer, and it wins on every axis except pool.** It selects
+FLASH_ATTN, which keeps full graphs just as Triton does, but without Triton's
+prefill penalty: at a matched 24/40 split BF16 is quicker than FP8 at prefill at
+two of three depths and tied at the third, *and* decodes 4.5% quicker (33.9–34.0
+against 35.5–35.6 ms). It is also the only one of the three that does not
+quantize the KV cache at all, so it needs no quality argument. The cost is
+density — 4 KB per token per layer means a 34,539-token pool against FP8's
+45,085. Both cover a full 32k request; FP8 allows 1.38x concurrency there
+against BF16's 1.05x, which is the only reason left to choose it.
+`start_qwen_dflash2_fast.sh` therefore ships **BF16 at 24/40**.
+
+**None of this transfers to the stable 140k MTP profile.** The same piecewise
+downgrade fires there — it is FP8/FlashInfer too — but switching it to int8pth
+is a net loss, measured same-session at 44/20, `MAX_LEN=140000`:
+
+| stable profile, 140k | ms/step | tok/step | e2e tok/s | pool |
+|---|---|---|---|---|
+| FP8 (as shipped) | 35.0 | 2.56–2.61 | 74.7–75.9 | **184,130** |
+| int8pth | 34.5 | 2.50–2.63 | 74.1–77.8 | 145,240 |
+
+Only −1.4% step time, against −21% of the pool, before counting a Triton
+prefill penalty that is worst exactly where this profile is used. Two reasons
+the win shrinks: MTP-3 verifies 4 query tokens where DFlash2-7 verifies 8, so
+there is less per-step launch overhead for full graphs to remove; and at long
+context int8pth is *less* dense, not more, because its per-head fp32 scale
+breaks the page divisibility (2112 vs 2080 B/token — gotcha 27). The stable
+profile stays on FP8.
+
+This also corrects an earlier claim in this file, that the per-token-head modes
+are "worth the Triton prefill penalty only when nothing else fits, never for
+speed." The table above already contradicted it — int8pth was quicker than FP8
+in both comparable rows — and the reason is the CUDA graph mode, not the cache
+dtype. What remains true is the *density* claim: below ~2 KB per token per
+layer more compression buys no context, because the Mamba/GDN state page binds
+(FP8 53,683 vs int8pth 52,986 at 44/20), and `MambaDType` only admits
+float32/float16/bfloat16, so that floor cannot be lowered.
+
 ## llama-swap integration
 
 `heterogeneous/llama-swap.example.yaml` holds the two model entries (also
@@ -246,7 +562,7 @@ docker compose logs -f hetero
 
 | variable | default | purpose |
 |---|---:|---|
-| `GPU_IDS` | `0,1` | CUDA order; the 5070 Ti must be first for the default split |
+| `GPU_IDS` | `0,1` | CUDA order; `1,0` reverses the pipeline (`start_qwen_fast.sh`) |
 | `PP_LAYERS` | `44,20` | target layers per pipeline rank; total must be 64 |
 | `MODEL` | fast variant if present | target model directory |
 | `SPEC` | `mtp` | `mtp`, `dflash2`, or `none` for a diagnostic baseline |
@@ -254,10 +570,10 @@ docker compose logs -f hetero
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
 | `DFLASH_KV_MEMORY` | `2500000000` | manual per-rank KV bytes for the DFlash2 profile |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `140000` / `32768` | API context limit (stable / DFlash2 wrappers) |
-| `MAX_SEQS` | `4` | scheduler slots and CUDA-graph sizing; 1 showed no gain |
+| `MAX_LEN` | `140000` / `32768` / `262144` | API context limit (stable / short / huge wrappers) |
+| `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
-| `KV` | `fp8` / `bf16` | FP8 for MTP (faster decode); BF16 for DFlash2 |
+| `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
 | `PREFIX_CACHE` | `1` | cache shared prefixes and resume hybrid recurrent state |
 | `ASYNC_SCHED` | `1` | asynchronous vLLM scheduler |
 | `INT8_ACT` | empty | W4A16 target; int8 activation GEMMs do not help batch size one |
@@ -271,6 +587,12 @@ bash heterogeneous/start_qwen_stable.sh
 
 # Experimental 32k DFlash2 profile
 bash heterogeneous/start_qwen_dflash2.sh
+
+# 32k reversed pipeline: 7.7% quicker per step, 33k of context
+bash heterogeneous/start_qwen_fast.sh
+
+# Full native 262k context (slower; for requests that would not otherwise fit)
+bash heterogeneous/start_qwen_huge.sh
 
 # Known-correct non-speculative fallback
 SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
@@ -289,7 +611,14 @@ PREFIX_CACHE=0 bash heterogeneous/start_qwen.sh
 - A full 140k request nearly fills the stable cache, so only one such request
   can be resident. Several shorter requests can run concurrently.
 - Pipeline parallelism still includes the slower 3060 in every model step and
-  cannot behave like one unified 28 GiB GPU.
+  cannot behave like one unified 28 GiB GPU. At concurrency 1 it does not even
+  overlap the two stages, so a single stream pays the sum of both; throughput
+  scales 4.12x to eight concurrent streams and no further without giving up
+  TTFT.
+- `start_qwen_fast.sh` trades context for step time and cannot exceed ~33k. It
+  leaves ~5 GiB idle on the 3060; that memory has no use in that arrangement.
+- The 262k profile is Triton-backend only and its prefill is much slower than
+  the stable profile's. It is a fits-or-does-not-fit mode, not a faster one.
 - Keep `GPU_UTIL=0.91` for the stable MTP profile; startup profiling does not
   include compiled-prefill or transient DeltaNet speculative workspace.
 - If llama-swap listens on a LAN interface with no auth, restrict network

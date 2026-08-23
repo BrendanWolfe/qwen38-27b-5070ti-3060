@@ -10,14 +10,23 @@ most of the target on the faster card and transfers activations only at the
 stage boundary. The conversion of the upstream 3090 codebase into this
 two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
-## Two setups
+## Five setups
 
 | profile | launcher | KV | context | measured decode |
 |---|---|---|---|---|
-| **stable / general** | `heterogeneous/start_qwen_stable.sh` | FP8 | 140k (146,847-token pool) | **83.8–84.9 tok/s** |
-| **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
+| **stable / general** | `heterogeneous/start_qwen_stable.sh` | FP8 | 140k (155,978-token pool) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
+| **fast / short** | `heterogeneous/start_qwen_fast.sh` | FP8 | 32k (33,363-token pool) | **78.7–82.6 tok/s** |
+| **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **83.4–86.0 tok/s** (77–159 t/s by workload) |
+| **fastest DFlash2** | `heterogeneous/start_qwen_dflash2_fast.sh` | BF16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
+| **huge context** | `heterogeneous/start_qwen_huge.sh` | int4 | **262k** (284,234-token pool) | batch only — prefill falls to ~112 tok/s at depth |
 
-Both use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
+The decode column is `bench/real_rep.sh` — 8 realistic 1,024-token prompts at
+concurrency 1, 3 reps — so the rows are comparable to each other. DFlash2's
+speed is strongly workload-dependent (77–159 tok/s across the range); the
+earlier headline of 91.7 tok/s came from a different prompt mix and is not
+comparable to these.
+
+All five use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
 vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
 8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the stable
 profile.
@@ -47,7 +56,8 @@ reasons, not luck:
 
 The context win is just as large: with Q5 weights the pair has only ~9.5 GB
 left for KV (roughly 20–40k tokens), while this fork's FP8 pool holds
-**146,847 tokens** — 131k+ context is only possible on the vLLM path.
+**155,978 tokens**, and the int4 profile reaches Qwen3.8's full native
+**262,144** — 131k+ context is only possible on the vLLM path.
 
 Honest tradeoffs versus the GGUF setup:
 
@@ -61,11 +71,29 @@ Honest tradeoffs versus the GGUF setup:
   (`VLLM_DFLASH_CUDAGRAPH=0`) because its shared quantized LM-head GEMM crashes
   inside DFlash's private CUDA graph — some speed is left on the table.
 - **Throughput shape.** The 3060 bounds every step and a full 140k request
-  occupies the cache alone; this is a low-latency box, not a many-concurrent-
-  requests box.
+  occupies the cache alone. A single stream pays both pipeline stages in
+  series, so concurrency is where this pair is strong rather than weak:
+  eight streams total 301 tok/s, 4.12x one stream, for 77% more per-token
+  latency. The stable profile now ships eight scheduler slots for this reason.
 
 ## What changed
 
+- **Reversed-pipeline and 262k profiles** — `heterogeneous/start_qwen_fast.sh`
+  puts the LM head, sampler and MTP drafter on the 5070 Ti instead of the 3060
+  (7.7% quicker per step, at 33k of context), and
+  `heterogeneous/start_qwen_huge.sh` reaches the model's native 262,144-token
+  context on int4 per-token-head KV. Both are measured in
+  [heterogeneous/README.md](heterogeneous/README.md).
+- **DFlash2 on FP8 KV and a reversed pipeline** —
+  `heterogeneous/start_qwen_dflash2_fast.sh`. The shipped DFlash2 profile's
+  assumption that it needs BF16 KV was untested and wrong: FP8 works, nearly
+  doubles the pool, and combined with putting the eager 1.2 GiB drafter on the
+  5070 Ti it is quicker as well. Also measured: below ~2 KB/token/layer the
+  Mamba state page binds the pool, so int8/int4 per-token-head KV buys no
+  context over FP8 while costing Triton-backend prefill speed.
+- **GDN metadata hoist** — `patches/vllm-pr52297-gdn-common-metadata.patch`,
+  upstream PR #52297 backported. It does not make this pair faster (0.3%), but
+  it lowers the profiled activation peak and buys 9,131 tokens of KV pool.
 - **MTP + pipeline parallelism** — `patches/vllm-pr46994-mtp-pp.patch`, a
   backport of upstream PR #46994 (MTP on the V2 runner under PP) plus the
   hybrid-Mamba int64 `index_fill_` fix PP long prefill needs. It is applied by

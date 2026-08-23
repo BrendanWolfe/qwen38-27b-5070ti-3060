@@ -1,12 +1,15 @@
 # Setup guide — RTX 5070 Ti + RTX 3060 (from zero to serving)
 
 Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
-**12 GiB RTX 3060**. By the end you will have two working profiles:
+**12 GiB RTX 3060**. By the end you will have five working profiles:
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
-| `start_qwen_stable.sh` | general-purpose, MTP-3 | 140k (146,847-token pool) | FP8 | **~84 tok/s** |
+| `start_qwen_stable.sh` | general-purpose, MTP-3 | 140k (155,978-token pool) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
+| `start_qwen_fast.sh` | reversed pipeline, MTP-3 | 32k (33,363-token pool) | FP8 | **~80 tok/s** |
 | `start_qwen_dflash2.sh` | short-context DFlash2 | 32k (33,506-token pool) | BF16 | **~92 tok/s** avg (77–159 t/s by workload) |
+| `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
+| `start_qwen_huge.sh` | full native context | **262k** (284,234-token pool) | int4 | batch only — ~112 tok/s prefill at depth |
 
 Everything is driven by this fork (`BrendanWolfe/qwen38-27b-rtx3090`) of
 [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090) —
@@ -138,7 +141,9 @@ bash heterogeneous/start_qwen_stable.sh
     -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"hej"}],
          "chat_template_kwargs":{"enable_thinking":false}}'
   ```
-- Expected: **83–85 tok/s** single-stream on realistic prompts, ~146,847-token
+- Expected: **74–75 tok/s** single-stream on realistic prompts (an earlier
+  repeated-512-token measurement read 84; both are in
+  [README.md](README.md)), ~155,978-token
   FP8 KV pool. Keep it in a `tmux` session or a systemd unit for long runs.
 
 ### DFlash2 profile (short context, fastest decode)
@@ -171,6 +176,9 @@ under `models:`. The entries:
 
 - `vllm-speed/qwen3.8-27b` — stable 140k MTP (`start_qwen_stable.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
+
+`start_qwen_fast.sh` and `start_qwen_huge.sh` are not wired into llama-swap by
+default; add them the same way if you want them swappable.
 
 Notes that matter:
 
