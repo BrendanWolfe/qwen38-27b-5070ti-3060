@@ -6,19 +6,19 @@ consumer GPUs**: a 16 GiB RTX 5070 Ti (`sm120`, CUDA logical device 0) and a
 repository's fast model variant, and both speculative decoders (MTP and
 DFlash2).
 
-Four setups are supported:
+Five setups are supported:
 
 | profile | launcher | speculation | KV | context | measured decode |
 |---|---|---|---|---|---|
-| stable / general | `start_qwen_stable.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (155,978-token pool) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
-| fast / short | `start_qwen_fast.sh` | MTP-3, reversed pipeline | FP8 | 32k (33,363-token pool) | **78.7-82.6 tok/s** |
+| batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (155,978-token pool) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
+| solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
 | short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
 | huge context | `start_qwen_huge.sh` | MTP-3, int4 per-token-head KV | int4 | **262k** (284,234-token pool) | batch only — ~112 tok/s prefill at depth |
 | fastest DFlash2 | `start_qwen_dflash2_fast.sh` | DFlash2-7, reversed 24/40 | bf16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 
 `start_qwen.sh` is the shared, tunable launcher every profile wraps.
 
-The stable profile's headline number is quoted two ways in this file because
+The batch profile's headline number is quoted two ways in this file because
 both are true and they answer different questions. A single stream decodes at
 73.6-75.5 tok/s on eight mixed realistic prompts (`bench/real_rep.sh`); an
 earlier repeated-512-token measurement read 83.8-84.9 on easier text. Four
@@ -67,12 +67,12 @@ free, use it; nothing here depends on it.
 
 - `heterogeneous/start_qwen.sh` — shared launcher: uneven PP, toolchain fixes,
   MTP/DFlash2/no-spec selection, process-group cleanup, no-auth mode.
-- `heterogeneous/start_qwen_stable.sh` — frozen MTP snapshot used by the
-  stable llama-swap model, so later experiments cannot change its behavior.
+- `heterogeneous/start_qwen_batch.sh` — frozen MTP snapshot used by the
+  general llama-swap model, so later experiments cannot change its behavior.
 - `heterogeneous/start_qwen_dflash2.sh` — 32k DFlash2 profile (BF16 KV,
   manually sized cache, eager drafter; see below).
-- `heterogeneous/start_qwen_fast.sh` — 32k reversed-pipeline MTP profile
-  (LM head and drafter on the 5070 Ti; 7.7% quicker per step).
+- `heterogeneous/start_qwen_solo.sh` — 262k single-stream KVarN MTP profile
+  (one scheduler slot, 4-bit keys / 2-bit values).
 - `heterogeneous/start_qwen_huge.sh` — 262k int4 per-token-head KV profile.
 - `heterogeneous/start_qwen_dflash2_fast.sh` — reversed-pipeline FP8 DFlash2;
   strictly better than `start_qwen_dflash2.sh`.
@@ -179,7 +179,7 @@ yields a measured 33,506-token pool at `MAX_LEN=32768`, `GPU_UTIL=0.915`.
 
 ## Measured results
 
-### Stable MTP profile
+### Batch MTP profile
 
 A repeated 512-token greedy technical response improved from **32.6 tok/s**
 (conservative non-speculative baseline) to **83.8-84.9 tok/s**. A real
@@ -210,7 +210,7 @@ tokens, one at a time):
 - **BF16, DFlash2-7: 91.7 tok/s** (3.34 accepted tokens per target step)
 
 Context-window caps alone do not make matrix math faster; their value is
-enabling cache/backend experiments. FP8 MTP remains the stable general and
+enabling cache/backend experiments. FP8 MTP remains the general and
 long-context profile; DFlash2 is the fastest tested short-context profile.
 Expected crossover: DFlash2 wins below ~8k prompts for general chat/coding and
 at much longer contexts for copy/quote/edit workloads (its lookup drafter
@@ -262,7 +262,7 @@ weights are ~14.7 GB, ~0.21 GB per layer, plus ~0.64 GB each for the
 the 3060 at ~360 GB/s, and **at concurrency 1 a pipeline does not overlap** —
 rank 0 runs, then rank 1 runs, so the step is the sum of the two stages:
 
-| stable profile, per decode step | bytes read | at that card's bandwidth |
+| batch profile, per decode step | bytes read | at that card's bandwidth |
 |---|---:|---:|
 | 5070 Ti (rank 0): 44 target layers + embedding | 9.9 GB | 11.0 ms |
 | 3060 (rank 1): 20 target layers | 4.2 GB | 11.7 ms |
@@ -288,7 +288,7 @@ rank* is.
 
 | change | ms/step | tok/step | KV pool | verdict |
 |---|---:|---:|---:|---|
-| stable 140k, as shipped | 35.2 | 2.54-2.58 | 146,847 | baseline |
+| batch 140k, as shipped | 35.2 | 2.54-2.58 | 146,847 | baseline |
 | + PR #52297 (GDN metadata hoist) | 35.1 | 2.54-2.58 | **155,978** | no speed change; +6.2% pool |
 | + reversed pipeline, 32k | **32.4** | 2.51-2.62 | 33,363 | -7.7% step time, -78% pool |
 
@@ -312,9 +312,10 @@ each card the same number of target layers as before — and therefore the same
 11/5 split of full-attention layers and the same KV bytes per token — but
 makes the 5070 Ti the last rank, so the LM head, the sampler and the MTP
 drafter move onto it. 35.1 -> 32.4 ms/step, 73.6-75.5 -> 78.7-82.6 tok/s,
-tokens per step unchanged. That is `start_qwen_fast.sh`.
+tokens per step unchanged. `start_qwen_dflash2_fast.sh` is the profile that
+ships this arrangement.
 
-It cannot become the stable profile, because the last rank also carries the
+It cannot become the general profile, because the last rank also carries the
 sampling and logits peak — 1.24 GiB against the first rank's 0.32 GiB — so the
 5070 Ti gives up ~3.15 GiB of KV (4.23 -> 1.08 GiB) and the pool collapses to
 33,363 tokens. At `MAX_LEN=100000` it will not start at all. The 3060 idles at
@@ -325,7 +326,7 @@ better.
 ### Concurrency
 
 Pipeline parallelism exists to overlap stages, and at one request it cannot.
-Measured on the stable profile, 512 output tokens, `vllm bench serve`:
+Measured on the batch profile, 512 output tokens, `vllm bench serve`:
 
 | concurrency | aggregate output tok/s | vs C1 | mean ITL | mean TTFT |
 |---|---:|---:|---:|---:|
@@ -402,7 +403,7 @@ hour of GPU time. What is verified is that the profile boots with a
 284,234-token pool, generates correctly, and passes a 32k needle; **recall
 beyond 32k is unverified here.**
 
-Use `start_qwen_stable.sh` as the general server and switch to this only when a
+Use `start_qwen_batch.sh` as the general server and switch to this only when a
 request will not fit, and only when you can wait.
 
 KVarN (`kvarn/`, `CTX=huge` in single-user mode) is denser still — ~840 B per
@@ -496,11 +497,11 @@ density — 4 KB per token per layer means a 34,539-token pool against FP8's
 against BF16's 1.05x, which is the only reason left to choose it.
 `start_qwen_dflash2_fast.sh` therefore ships **BF16 at 24/40**.
 
-**None of this transfers to the stable 140k MTP profile.** The same piecewise
+**None of this transfers to the batch 140k MTP profile.** The same piecewise
 downgrade fires there — it is FP8/FlashInfer too — but switching it to int8pth
 is a net loss, measured same-session at 44/20, `MAX_LEN=140000`:
 
-| stable profile, 140k | ms/step | tok/step | e2e tok/s | pool |
+| batch profile, 140k | ms/step | tok/step | e2e tok/s | pool |
 |---|---|---|---|---|
 | FP8 (as shipped) | 35.0 | 2.56–2.61 | 74.7–75.9 | **184,130** |
 | int8pth | 34.5 | 2.50–2.63 | 74.1–77.8 | 145,240 |
@@ -510,7 +511,7 @@ prefill penalty that is worst exactly where this profile is used. Two reasons
 the win shrinks: MTP-3 verifies 4 query tokens where DFlash2-7 verifies 8, so
 there is less per-step launch overhead for full graphs to remove; and at long
 context int8pth is *less* dense, not more, because its per-head fp32 scale
-breaks the page divisibility (2112 vs 2080 B/token — gotcha 27). The stable
+breaks the page divisibility (2112 vs 2080 B/token — gotcha 27). The batch
 profile stays on FP8.
 
 This also corrects an earlier claim in this file, that the per-token-head modes
@@ -527,7 +528,7 @@ float32/float16/bfloat16, so that floor cannot be lowered.
 `heterogeneous/llama-swap.example.yaml` holds the two model entries (also
 what runs on the origin host):
 
-- `vllm-speed/qwen3.8-27b` — stable 140k MTP (`start_qwen_stable.sh`)
+- `vllm-speed/qwen3.8-27b` — general 140k MTP (`start_qwen_batch.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — experimental 32k DFlash2
   (`start_qwen_dflash2.sh`)
 
@@ -562,18 +563,18 @@ docker compose logs -f hetero
 
 | variable | default | purpose |
 |---|---:|---|
-| `GPU_IDS` | `0,1` | CUDA order; `1,0` reverses the pipeline (`start_qwen_fast.sh`) |
+| `GPU_IDS` | `0,1` | CUDA order; `1,0` reverses the pipeline (`start_qwen_dflash2_fast.sh`) |
 | `PP_LAYERS` | `44,20` | target layers per pipeline rank; total must be 64 |
 | `MODEL` | fast variant if present | target model directory |
 | `SPEC` | `mtp` | `mtp`, `dflash2`, or `none` for a diagnostic baseline |
-| `DRAFT_TOKENS` | `3` | MTP depth; three is the stable FP8 long-context setting |
+| `DRAFT_TOKENS` | `3` | MTP depth; three is the FP8 long-context setting |
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
 | `DFLASH_KV_MEMORY` | `2500000000` | manual per-rank KV bytes for the DFlash2 profile |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `140000` / `32768` / `262144` | API context limit (stable / short / huge wrappers) |
+| `MAX_LEN` | `140000` / `32768` / `262144` | API context limit (batch / short / solo and huge wrappers) |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
-| `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
+| `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
 | `PREFIX_CACHE` | `1` | cache shared prefixes and resume hybrid recurrent state |
 | `ASYNC_SCHED` | `1` | asynchronous vLLM scheduler |
 | `INT8_ACT` | empty | W4A16 target; int8 activation GEMMs do not help batch size one |
@@ -582,14 +583,14 @@ docker compose logs -f hetero
 Examples:
 
 ```bash
-# Frozen stable profile (what llama-swap runs)
-bash heterogeneous/start_qwen_stable.sh
+# Frozen general profile (what llama-swap runs)
+bash heterogeneous/start_qwen_batch.sh
 
 # Experimental 32k DFlash2 profile
 bash heterogeneous/start_qwen_dflash2.sh
 
-# 32k reversed pipeline: 7.7% quicker per step, 33k of context
-bash heterogeneous/start_qwen_fast.sh
+# Full native 262k context on ONE stream, at the batch profile's decode rate
+bash heterogeneous/start_qwen_solo.sh
 
 # Full native 262k context (slower; for requests that would not otherwise fit)
 bash heterogeneous/start_qwen_huge.sh
@@ -608,18 +609,20 @@ PREFIX_CACHE=0 bash heterogeneous/start_qwen.sh
   quantized LM head. MTP+PP is a backport of upstream PR #46994.
 - The V2 runner does not support the `thinking_token_budget` request field;
   normal thinking controls and `chat_template_kwargs.enable_thinking` work.
-- A full 140k request nearly fills the stable cache, so only one such request
+- A full 140k request nearly fills the batch cache, so only one such request
   can be resident. Several shorter requests can run concurrently.
 - Pipeline parallelism still includes the slower 3060 in every model step and
   cannot behave like one unified 28 GiB GPU. At concurrency 1 it does not even
   overlap the two stages, so a single stream pays the sum of both; throughput
   scales 4.12x to eight concurrent streams and no further without giving up
   TTFT.
-- `start_qwen_fast.sh` trades context for step time and cannot exceed ~33k. It
+- The reversed pipeline trades context for step time and cannot exceed ~33k. It
   leaves ~5 GiB idle on the 3060; that memory has no use in that arrangement.
+- `start_qwen_solo.sh` serves exactly one request at a time. A second concurrent
+  request queues behind the first; use the batch profile when that matters.
 - The 262k profile is Triton-backend only and its prefill is much slower than
-  the stable profile's. It is a fits-or-does-not-fit mode, not a faster one.
-- Keep `GPU_UTIL=0.91` for the stable MTP profile; startup profiling does not
+  the batch profile's. It is a fits-or-does-not-fit mode, not a faster one.
+- Keep `GPU_UTIL=0.91` for the batch MTP profile; startup profiling does not
   include compiled-prefill or transient DeltaNet speculative workspace.
 - If llama-swap listens on a LAN interface with no auth, restrict network
   access at the firewall.

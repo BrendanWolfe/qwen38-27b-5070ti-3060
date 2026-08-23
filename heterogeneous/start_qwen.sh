@@ -41,7 +41,7 @@ ASYNC_SCHED=${ASYNC_SCHED:-1}
 SPEC=${SPEC:-mtp}
 DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 
-[ "$GPU_IDS" = "0,1" ] || echo "INFO: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES, not by physical device id. GPU_IDS=1,0 is the reversed pipeline used by start_qwen_fast.sh (drafter and LM head on the 5070 Ti); anything else, verify the split is what you meant." >&2
+[ "$GPU_IDS" = "0,1" ] || echo "INFO: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES, not by physical device id. GPU_IDS=1,0 is the reversed pipeline used by start_qwen_dflash2_fast.sh (drafter and LM head on the 5070 Ti); anything else, verify the split is what you meant." >&2
 [ "$PP_LAYERS" = "44,20" ] || echo "INFO: using custom pipeline layer partition $PP_LAYERS (must total 64)." >&2
 
 if [ "$KV" = "bf16" ]; then
@@ -79,10 +79,10 @@ elif [ "$KV" = "kvarn" ]; then
   #
   #   KV=kvarn  32k  MAX_SEQS=1   171,239-token pool   74.6 tok/s, 35.2 ms/step
   #   KV=kvarn  32k  MAX_SEQS=8    78,220-token pool
-  #   KV=fp8   140k  MAX_SEQS=8   155,978-token pool   73.6-75.5 tok/s (stable)
+  #   KV=fp8   140k  MAX_SEQS=8   155,978-token pool   73.6-75.5 tok/s (batch)
   #   KV=int4pth 262k MAX_SEQS=4  284,234-token pool   (start_qwen_huge.sh)
   #
-  # So at one slot KVarN beats the stable profile's pool at matching decode, and
+  # So at one slot KVarN beats the batch profile's pool at matching decode, and
   # at eight it holds half of it: KVarN forces a 2048-token attention block to
   # match the GDN page, and every scheduler slot pays a full aligned page. The
   # density win is real per token and is spent on slots. At 262k with 4 slots it

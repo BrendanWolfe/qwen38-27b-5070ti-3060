@@ -227,7 +227,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `MAX_SEQS` 1 against 8 moves it by about **8 MiB in total**. So dropping to one slot for a
     genuinely single-user server buys no context at all, and the slot count at a long block is
     about CUDA graph memory, not state pages — measured later at 0.13 GiB for 4 slots against
-    0.14 GiB for 8, which is why the stable profile now defaults to `MAX_SEQS=8`.
+    0.14 GiB for 8, which is why the batch profile now defaults to `MAX_SEQS=8`.
 34. **Asking for an impossible `max_model_len` is the cheapest way to read the memory model.**
     vLLM prints "X GiB KV cache is needed ... available Y GiB ... estimated maximum model
     length is Z" and dies in ~90 s, before torch.compile finishes and long before graph

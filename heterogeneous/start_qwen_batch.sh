@@ -1,5 +1,10 @@
 #!/bin/bash
-# Experimental two-GPU mode for an RTX 5070 Ti (16 GiB) + RTX 3060 (12 GiB).
+# General-purpose CONCURRENT profile for an RTX 5070 Ti (16 GiB) + RTX 3060
+# (12 GiB): FP8 KV, MTP-3, eight scheduler slots, 140k of context. This is the
+# profile llama-swap runs, and it is a full standalone copy of start_qwen.sh
+# rather than a wrapper, so later experiments in the shared launcher cannot
+# change what the served model does. Use start_qwen_solo.sh instead when one
+# stream needs the full native 262k context.
 #
 # Pipeline parallelism is intentional. These cards have different capacities and
 # no peer-to-peer PCIe access; tensor parallelism would split every layer evenly

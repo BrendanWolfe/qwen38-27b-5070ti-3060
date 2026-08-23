@@ -1,6 +1,6 @@
 #!/bin/bash
 # Single-stream long-context profile: KVarN 4/2-bit KV, ONE request at a time,
-# the model's full native 262,144 context in a 296,974-token pool at the stable
+# the model's full native 262,144 context in a 296,974-token pool at the batch
 # profile's decode rate.
 #
 # This is the one shape in which KVarN wins on this pair. Measured against the
@@ -9,10 +9,10 @@
 #
 #   profile              KV       slots  ctx    pool      decode
 #   start_qwen_solo.sh   KVarN      1    262k   296,974   72.4-73.6 tok/s, 34.8-35.4 ms/step
-#   start_qwen_stable.sh fp8        8    140k   155,978   73.6-75.5 tok/s
+#   start_qwen_batch.sh  fp8        8    140k   155,978   73.6-75.5 tok/s
 #   start_qwen_huge.sh   int4pth    4    262k   284,234   batch only (~112 tok/s prefill at depth)
 #
-# Against stable that is 90% more pool and 122k more context at the same decode
+# Against batch that is 90% more pool and 122k more context at the same decode
 # rate and the same tokens/step (2.48-2.52 against 2.51-2.62) -- for ONE stream.
 # It also holds a larger pool than start_qwen_huge.sh at the same 262,144
 # context (296,974 against 284,234), so if you want the native context on a

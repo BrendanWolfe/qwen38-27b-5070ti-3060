@@ -10,7 +10,7 @@
 # The per-token-head quant modes exist only in the Triton attention backend,
 # which is much slower than FlashInfer at long context. This is a mode for
 # requests that would not otherwise fit, not a faster one -- keep
-# start_qwen_stable.sh as the general server and switch to this only when a
+# start_qwen_batch.sh as the general server and switch to this only when a
 # request exceeds its window. See heterogeneous/README.md for measurements.
 #
 # Untested past what README.md reports; KVarN (kvarn/, CTX=huge upstream) is

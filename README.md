@@ -14,8 +14,8 @@ two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
 | profile | launcher | KV | context | measured decode |
 |---|---|---|---|---|
-| **stable / general** | `heterogeneous/start_qwen_stable.sh` | FP8 | 140k (155,978-token pool) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
-| **fast / short** | `heterogeneous/start_qwen_fast.sh` | FP8 | 32k (33,363-token pool) | **78.7–82.6 tok/s** |
+| **batch / general** | `heterogeneous/start_qwen_batch.sh` | FP8 | 140k (155,978-token pool) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
+| **solo / long** | `heterogeneous/start_qwen_solo.sh` | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, one stream only |
 | **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **83.4–86.0 tok/s** (77–159 t/s by workload) |
 | **fastest DFlash2** | `heterogeneous/start_qwen_dflash2_fast.sh` | BF16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 | **huge context** | `heterogeneous/start_qwen_huge.sh` | int4 | **262k** (284,234-token pool) | batch only — prefill falls to ~112 tok/s at depth |
@@ -28,7 +28,7 @@ comparable to these.
 
 All five use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
 vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
-8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the stable
+8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the batch
 profile.
 
 ## Why this is faster than a two-GPU GGUF setup (and what it costs)
@@ -74,15 +74,22 @@ Honest tradeoffs versus the GGUF setup:
   occupies the cache alone. A single stream pays both pipeline stages in
   series, so concurrency is where this pair is strong rather than weak:
   eight streams total 301 tok/s, 4.12x one stream, for 77% more per-token
-  latency. The stable profile now ships eight scheduler slots for this reason.
+  latency. The batch profile now ships eight scheduler slots for this reason.
 
 ## What changed
 
-- **Reversed-pipeline and 262k profiles** — `heterogeneous/start_qwen_fast.sh`
-  puts the LM head, sampler and MTP drafter on the 5070 Ti instead of the 3060
-  (7.7% quicker per step, at 33k of context), and
-  `heterogeneous/start_qwen_huge.sh` reaches the model's native 262,144-token
-  context on int4 per-token-head KV. Both are measured in
+- **Single-stream 262k on KVarN** — `heterogeneous/start_qwen_solo.sh` runs the
+  model's full native 262,144-token context in a 296,974-token pool at the
+  batch profile's decode rate, by spending all of the KV budget on one
+  scheduler slot and 4-bit-key/2-bit-value KV. It is the first profile here to
+  run KVarN under MTP and pipeline parallelism at all, and it holds a larger
+  pool than `heterogeneous/start_qwen_huge.sh` at the same context.
+- **Reversing the pipeline is worth 7.7%** — putting the LM head, sampler and
+  drafter on the 5070 Ti instead of the 3060 costs ~3.15 GiB of KV on the
+  bigger card, so it only pays where context is cheap:
+  `heterogeneous/start_qwen_dflash2_fast.sh` is the profile that ships it.
+  `heterogeneous/start_qwen_huge.sh` reaches 262,144 tokens on int4
+  per-token-head KV. Both are measured in
   [heterogeneous/README.md](heterogeneous/README.md).
 - **DFlash2 on FP8 KV and a reversed pipeline** —
   `heterogeneous/start_qwen_dflash2_fast.sh`. The shipped DFlash2 profile's
@@ -125,8 +132,8 @@ Honest tradeoffs versus the GGUF setup:
   crashes inside DFlash's private CUDA graph, so the drafter runs eagerly while
   the target keeps compilation and graphs).
 - **Launchers** — `heterogeneous/start_qwen.sh` (shared, tunable),
-  `start_qwen_stable.sh` (frozen MTP snapshot) and `start_qwen_dflash2.sh`
-  (32k DFlash2). They encode
+  `start_qwen_batch.sh` (frozen MTP snapshot), `start_qwen_solo.sh` (262k
+  single-stream KVarN) and `start_qwen_dflash2.sh` (32k DFlash2). They encode
   the host/toolchain fixes this pair needed: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
   `TORCH_CUDA_ARCH_LIST="8.6;12.0"`, GCC 15 for CUDA 13.3's JIT, unsetting
   `VLLM_MARLIN_INPUT_DTYPE` for W4A16, `GPU_UTIL=0.91` (0.93 OOMed compiled
@@ -134,7 +141,7 @@ Honest tradeoffs versus the GGUF setup:
   vLLM flags for accurate per-request metrics and Qwen tool calling.
 - **llama-swap** — the two model entries in
   `heterogeneous/llama-swap.example.yaml`:
-  `vllm-speed/qwen3.8-27b` (stable) and `vllm-speed/qwen3.8-27b-dflash2`
+  `vllm-speed/qwen3.8-27b` (batch) and `vllm-speed/qwen3.8-27b-dflash2`
   (unprefixed IDs kept as aliases).
 - **Docker** — a `hetero` compose profile (two-GPU reservation) and a `hetero`
   entrypoint command.

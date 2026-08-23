@@ -5,8 +5,8 @@ Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
-| `start_qwen_stable.sh` | general-purpose, MTP-3 | 140k (155,978-token pool) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
-| `start_qwen_fast.sh` | reversed pipeline, MTP-3 | 32k (33,363-token pool) | FP8 | **~80 tok/s** |
+| `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 140k (155,978-token pool) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
+| `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
 | `start_qwen_dflash2.sh` | short-context DFlash2 | 32k (33,506-token pool) | BF16 | **~92 tok/s** avg (77–159 t/s by workload) |
 | `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
 | `start_qwen_huge.sh` | full native context | **262k** (284,234-token pool) | int4 | batch only — ~112 tok/s prefill at depth |
@@ -124,10 +124,10 @@ llama-swap (step 8) runs with `NO_API_KEY=1` and needs no key.
 
 ## 7. Run
 
-### Stable MTP profile (general purpose, 140k context)
+### Batch MTP profile (general purpose, 140k context)
 
 ```bash
-bash heterogeneous/start_qwen_stable.sh
+bash heterogeneous/start_qwen_batch.sh
 ```
 
 - First start takes a few minutes: model load, torch.compile (cached after the
@@ -174,10 +174,10 @@ Install llama-swap, then merge the two model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
-- `vllm-speed/qwen3.8-27b` — stable 140k MTP (`start_qwen_stable.sh`)
+- `vllm-speed/qwen3.8-27b` — general 140k MTP (`start_qwen_batch.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
 
-`start_qwen_fast.sh` and `start_qwen_huge.sh` are not wired into llama-swap by
+`start_qwen_solo.sh` and `start_qwen_huge.sh` are not wired into llama-swap by
 default; add them the same way if you want them swappable.
 
 Notes that matter:
@@ -199,7 +199,7 @@ Notes that matter:
 |---|---|
 | `patch: … REJECTED` | vLLM not 0.27.1 (reinstall from `docker/requirements.txt`), or patches applied twice (re-extract/reinstall). |
 | startup `ValueError: … KV cache is needed, larger than the available` | `DFLASH_KV_MEMORY` too small for `MAX_LEN`, or too much GPU memory already used (check `nvidia-smi`). |
-| `torch.OutOfMemoryError` mid-request on stable profile | `GPU_UTIL` too high. 0.91 is the safe value; startup profiling does not include compiled-prefill workspaces. |
+| `torch.OutOfMemoryError` mid-request on batch profile | `GPU_UTIL` too high. 0.91 is the safe value; startup profiling does not include compiled-prefill workspaces. |
 | `Failed to CUDA calloc async 40 bytes` (NCCL) on DFlash2 | rank 1 ran out — lower `DFLASH_KV_MEMORY` or `GPU_UTIL`. |
 | Marlin `torch_call_dispatcher … aten::empty` during capture | DFlash's private CUDA graph with the shared quantized LM head — keep `VLLM_DFLASH_CUDAGRAPH=0` (the wrapper sets it). |
 | orphaned processes after a crash | the launchers run vLLM under `setsid` and kill the whole process group on exit; check `nvidia-smi` for stuck workers and `pkill -f 'vllm serve'` if needed. |
