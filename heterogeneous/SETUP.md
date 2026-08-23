@@ -170,7 +170,7 @@ SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
 
 ## 8. (Optional) llama-swap front door
 
-Install llama-swap, then merge the three model entries from
+Install llama-swap, then merge the four model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
