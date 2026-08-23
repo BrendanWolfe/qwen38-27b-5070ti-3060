@@ -50,6 +50,32 @@
 #   -> 32.6 ms/step, 97.4-103.2 tok/s, 18,770-token pool.
 #   PP_LAYERS=16,48 KV=int8pth MAX_LEN=8192 DFLASH_TOKENS=5 MAX_SEQS=2
 #   DFLASH_KV_MEMORY=1000000000 -> 30.3-30.6 ms/step, 98.6-104.2 tok/s, 10,436.
+#
+# WHY THIS STAYS AT 32k WHILE start_qwen_dflash2.sh RUNS 88k. Reversing the
+# pipeline puts the drafter, LM head and sampler on the 5070 Ti, and that is
+# worth +13.4% decode -- but only at short context, and it does NOT free
+# memory. It moves the bottleneck: the 5070 Ti now carries 40 of 64 layers AND
+# the drafter (10.62 GiB of weights, ~1.4 GiB spare) while the 3060 holds 24
+# layers and idles on 2.67 GiB. Measured, every row probed with a real prompt
+# near MAX_LEN followed by a health check:
+#
+#   split  drafter   cap    KV    MAX_LEN  pool      decode   prefill  long prompt
+#   44,20  3060      3.2G   fp8    88,000   97,962   85.77    991/s    survives
+#   28,36  5070 Ti   3.2G   fp8    88,000  117,886   87.60    761/s    survives
+#   24,40  5070 Ti   2.15G  bf16   32,768   34,539   97.24    957/s    survives  <- shipped
+#   24,40  5070 Ti   2.6G   fp8    60,000   85,123   90.66    --       OOM-KILLED
+#   24,40  5070 Ti   3.2G   fp8    88,000  117,886   --       --       dies at startup
+#
+# So the 13% is a SHORT-CONTEXT win. At 88k the reversed split has to give
+# layers back to the 3060 to fit, and the advantage collapses to +2.1% decode
+# while costing 23% of prefill (761 against 991 tok/s -- 105 s to first token on
+# an 80k prompt against 81 s). For long context the forward split is the better
+# machine; this profile is for short prompts where 97 tok/s is the point.
+#
+# DO NOT raise DFLASH_KV_MEMORY here. 2.6 GB boots, benches at 90.66 tok/s, and
+# then dies with a 500 partway into a 55k prompt. The shipped 2.15 GB is
+# verified to survive a 30,038-token prompt.
+
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

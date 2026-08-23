@@ -332,6 +332,36 @@ in gotcha 38, which spans 146,086 to 188,769 tokens on this profile with no
 code change at all. The patch may or may not help the pool; one run each
 cannot tell, and nothing here has measured it properly.
 
+### Reversing the pipeline is a short-context win only
+
+Putting the drafter, LM head and sampler on the 5070 Ti is worth **+13.4%**
+decode on DFlash2 (97.24 against 85.77 tok/s, ITL 33.2 against 37.5) with
+acceptance length unchanged at 3.30 against 3.28 — so it is pure placement, not
+a quality difference.
+
+It does **not** free memory, which is the intuitive but wrong reason to reach
+for it. It relocates the pressure: reversed, the 5070 Ti carries 40 of 64
+layers *and* the drafter (10.62 GiB of weights, ~1.4 GiB spare) while the 3060
+holds 24 layers and idles on 2.67 GiB. Forward, the 3060 carries 20 layers plus
+the drafter's 2.69 GiB and has 1.44 GiB spare. Either way one card is tight.
+
+Every row below was probed with a real prompt near `MAX_LEN` and a health check
+afterwards:
+
+| split | drafter | cap | KV | MAX_LEN | pool | decode | prefill | long prompt |
+|---|---|---:|---|---:|---:|---:|---:|---|
+| 44,20 | 3060 | 3.2G | fp8 | 88,000 | 97,962 | 85.77 | 991/s | survives |
+| 28,36 | 5070 Ti | 3.2G | fp8 | 88,000 | 117,886 | 87.60 | 761/s | survives |
+| 24,40 | 5070 Ti | 2.15G | bf16 | 32,768 | 34,539 | **97.24** | 957/s | survives |
+| 24,40 | 5070 Ti | 2.6G | fp8 | 60,000 | 85,123 | 90.66 | — | OOM-killed |
+| 24,40 | 5070 Ti | 3.2G | fp8 | 88,000 | 117,886 | — | — | dies at startup |
+
+To hold 88k the reversed split must give layers back to the 3060, and the
+advantage collapses to +2.1% decode while costing **23% of prefill** — 105 s to
+first token on an 80k prompt against 81 s. So the two DFlash2 profiles are
+complementary rather than redundant: `start_qwen_dflash2.sh` is the long-context
+machine at 88k, `start_qwen_dflash2_fast.sh` is 97 tok/s at 32k.
+
 **Reversing the pipeline is worth 7.7%.** `GPU_IDS=1,0 PP_LAYERS=20,44` gives
 each card the same number of target layers as before — and therefore the same
 11/5 split of full-attention layers and the same KV bytes per token — but
