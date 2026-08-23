@@ -271,6 +271,24 @@ if [ "$SPEC" = "dflash2" ]; then
            "MAX_SEQS=$MAX_SEQS admits more than that and the rest queue."
     fi
   fi
+  # Above ~12 seats at CTX=huge the seats stop being merely useless and become fatal, and
+  # not through the graph budget that gotcha 38 caps -- CG is already pinned at 64 in
+  # every one of these. The per-seat runner allocations eat the transient headroom the
+  # first prefill needs, so the engine boots, captures, answers /health 200, and then
+  # dies on the first real prompt with torch.OutOfMemoryError inside the caching
+  # allocator. Measured on one 24 GiB 3090, SPEC=dflash2 k=7, free VRAM after boot
+  # against a single ~3.7k-token prompt (gotcha 39):
+  #   MAX_SEQS=8   596 MiB  ok      MAX_SEQS=12  416 MiB  ok
+  #   MAX_SEQS=10  456 MiB  ok      MAX_SEQS=16  356 MiB  DEAD, twice, same byte counts
+  # The prefill's transient set is ~356 MiB at --max-num-batched-tokens 2048, so 12
+  # clears it by ~60 MiB. Warning rather than a clamp: the number is a VRAM budget, and a
+  # card larger than 24 GiB will have room where this one does not. Lower KV_MEM if you
+  # genuinely need the seats.
+  if [ "$CTX" = "huge" ] && [ "$MAX_SEQS" -gt 12 ]; then
+    echo "[start_qwen] WARNING: MAX_SEQS=$MAX_SEQS at CTX=huge killed the engine on the" \
+         "first prompt on a 24 GiB card (boots, serves /health, then OutOfMemoryError)." \
+         "12 is the highest verified here. Lower MAX_SEQS or lower KV_MEM." >&2
+  fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
 else
   MAX_SEQS=${MAX_SEQS:-8}

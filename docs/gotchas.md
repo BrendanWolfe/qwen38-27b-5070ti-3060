@@ -410,3 +410,37 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `CG` at 64, which leaves every shipped default untouched and makes the oversized
     batches run piecewise instead of not at all. Set `CG` explicitly to override, and
     raise `VLLM_V2_CUDAGRAPH_MEM_MIB` with it.
+
+39. **Capping the graph budget did not close the seat-count death — `MAX_SEQS > 12` at
+    `CTX=huge` still kills the engine, and the graphs are innocent.** Same visible
+    failure as gotcha 38 (boots, captures, `/health` 200, dies on the first prompt with
+    `torch.OutOfMemoryError`), different bill. `CG` is pinned at its 64 cap in every one
+    of the runs below, so the memory is going to allocations that scale with
+    `max_num_seqs` itself, not with the captured batch. Free VRAM after boot on one
+    24 GiB 3090, `SPEC=dflash2 CTX=huge PREFIX_CACHE=1` k=7, then a single ~3.7k-token
+    prompt:
+
+    | `MAX_SEQS` | free after boot | one ~3.7k prompt |
+    |---|---|---|
+    | 8 | 596 MiB | ok |
+    | 10 | 456 MiB | ok |
+    | 12 | 416 MiB | ok |
+    | **16** | **356 MiB** | **dead** |
+
+    The allocator says it plainly: `expandable_segments: memory mapping failed with OOM
+    on device 0 while trying to map 20971520 bytes (free: 20578304, total:
+    25272516608)` — 20 MB wanted against 20 MB left, on a card with 24 GB. It needs no
+    concurrency at all: `num_running_reqs=1`, `step_counter=0`, `kv_cache_usage=0.18`.
+    Reproduced twice with byte-identical counters. The prefill's transient working set
+    is ~356 MiB at `--max-num-batched-tokens 2048`, which is why 12 survives by ~60 MiB
+    and 16 does not survive at all.
+
+    The launcher warns above 12 rather than clamping, because unlike `CG` this is a VRAM
+    budget rather than a shape: a card bigger than 24 GiB has room where this one does
+    not. If you want the seats, buy them with `KV_MEM` — the pinned pool is what left no
+    headroom. And note the shipped `CTX=huge` default is `MAX_SEQS=2`, so nothing here
+    is reachable without an override.
+
+    Worth reading next to the concurrency section of the README: seats above the
+    residency were already useless (they queue, then preempt). Past 12 at `CTX=huge`
+    they stop being useless and become fatal.
