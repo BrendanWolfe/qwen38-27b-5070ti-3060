@@ -94,6 +94,22 @@ Honest tradeoffs versus the GGUF setup:
 - **GDN metadata hoist** — `patches/vllm-pr52297-gdn-common-metadata.patch`,
   upstream PR #52297 backported. It does not make this pair faster (0.3%), but
   it lowers the profiled activation peak and buys 9,131 tokens of KV pool.
+- **Bug B, the uniform-decode prefill dispatch** —
+  `patches/zzz-bugb-uniform-prefill.patch`, upstream's `a75ee4b` lifted out of
+  `kvarn/kvarn-v2-runner.patch` so it applies without installing KVarN. vLLM's
+  `get_uniform_token_count` has no prefill discriminator, so a request whose
+  final prefill chunk is exactly `decode_query_len` tokens is dispatched as a
+  uniform decode batch and the captured spec-verify CUDA graph is replayed over
+  prompt tokens: dflash2 degenerates into repetition, mtp returns an empty
+  answer with `finish_reason=stop`. It needs a prefix-cache hit, a FULL capture
+  and speculation together — which these profiles have by default and upstream
+  single-user does not, since it defaults `PREFIX_CACHE=0` and this fork
+  defaults it to 1. Pinning `cudagraph_mode=PIECEWISE` is the upstream
+  workaround; here it would undo the reason `bf16` and `int8pth` are the
+  preferred KV modes (they are the ones that keep full graphs under
+  spec-decode), so the runner is fixed instead. The failure rate on this pair
+  is **not** measured — upstream's "one prompt length in every 128" is a
+  consequence of `--prefix-match-unit 128`, which these profiles do not set.
 - **MTP + pipeline parallelism** — `patches/vllm-pr46994-mtp-pp.patch`, a
   backport of upstream PR #46994 (MTP on the V2 runner under PP) plus the
   hybrid-Mamba int64 `index_fill_` fix PP long prefill needs. It is applied by

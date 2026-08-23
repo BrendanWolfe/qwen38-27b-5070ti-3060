@@ -1,0 +1,61 @@
+Bug B: reject a batch that still contains prefill tokens from the uniform-decode
+dispatch (upstream syv-ai/qwen38-27b-rtx3090 a75ee4b, lifted out of
+kvarn/kvarn-v2-runner.patch so it applies without KVarN).
+
+get_uniform_token_count only asks whether num_toks == max_query_len * num_reqs. It
+has no prefill discriminator, so a request whose FINAL PREFILL CHUNK is exactly
+decode_query_len tokens reports "uniform" and the V2 runner replays the captured
+spec-verify CUDA graph over prompt tokens. dflash2 collapses into degenerate
+repetition at ~1.97 tok/step; mtp returns "" or "#" with finish_reason=stop.
+
+Three conditions, and the heterogeneous profiles here meet all three by default,
+which is why this is not filed under kvarn/:
+  - a prefix-cache HIT. heterogeneous/start_qwen{,_stable}.sh default
+    PREFIX_CACHE=1, where upstream single-user defaults it to 0.
+  - a CAPTURED (FULL) verify step. This stack resolves cudagraph_mode to
+    FULL_AND_PIECEWISE, and the bf16/int8pth KV modes are chosen precisely to keep
+    it -- see the AttentionCGSupport note in start_qwen.sh. PIECEWISE would be the
+    workaround; it would also undo that tuning, so fix the runner instead.
+  - speculation. SPEC=mtp DRAFT_TOKENS=3 gives a 4-token verify block.
+
+Upstream ties the failure to one prompt length in every 128 because CTX=huge runs
+--prefix-match-unit 128. These profiles do not set that flag, so the trigger period
+here is the default hash unit rather than 128, and has NOT been measured on this
+pair -- the mechanism is what carries over, not the rate. bench/bugb_sweep.py
+measures it; note it templates the prompt before counting (the Qwen3 wrapper is
++12 tokens) and that a fresh server per length is required, or request N inherits
+request N-1's blocks.
+
+The hunk is byte-identical to the one in kvarn/kvarn-v2-runner.patch, marker text
+included, so kvarn/install.sh's port(kvarn-v2) marker count is satisfied whichever
+path applied it, and `patch -N` skips it as already-applied on the second.
+
+Applies to the fully patched tree (after vllm-pr46994-mtp-pp and
+zz-dflash2-pipeline-parallel, both of which shift this file); hence zzz-.
+Written against vLLM 0.27.1.
+
+--- a/v1/worker/gpu/model_runner.py
++++ b/v1/worker/gpu/model_runner.py
+@@ -1252,6 +1252,22 @@
+         num_toks = scheduler_output.total_num_scheduled_tokens
+         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
++        # port(kvarn-v2): a batch that still contains PREFILL tokens is not a uniform
++        # DECODE batch, however evenly its tokens happen to divide. get_uniform_token_count
++        # only checks num_toks == max_query_len * num_reqs, so a lone request whose final
++        # prefill chunk is exactly decode_query_len tokens reports uniform and replays the
++        # captured spec-verify graph over prompt tokens. With --prefix-match-unit 128 and a
++        # prefix-cache hit the scheduler cuts that last chunk at (prompt_len % 128), so this
++        # fires on exactly one prompt length in every 128 -- Bug B (docs/gotchas.md 37).
++        if uniform_tok_count is not None and not dummy_run:
++            ncomp = self.req_states.num_computed_tokens_np
++            pfill = self.req_states.prefill_len.np
++            idx_of = self.req_states.req_id_to_index
++            for _req_id in scheduler_output.num_scheduled_tokens:
++                _i = idx_of.get(_req_id)
++                if _i is not None and ncomp[_i] < pfill[_i]:
++                    uniform_tok_count = None
++                    break
+ 
+         num_active_loras = 0
+         if self.lora_config:
