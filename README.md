@@ -22,9 +22,12 @@ length is not measuring the same thing, and mixing the two is how
 [#3](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/3) got confusing.</sub>
 
 Both modes share one install — the mode is just which launch script you run.
-Speculation wins below ~8 concurrent users, plain batching above. Numbers are
-`vllm bench serve` on an RTX 3090 at a 250 W power limit. If the card is yours
-alone, the fastest configuration is three environment variables away:
+Speculation wins below ~8 concurrent users on short prompts, plain batching above;
+on long independent sessions the crossover is much earlier, because a speculating
+request reserves recurrent-state pages the pool has few of — the concurrency
+paragraph under "DFlash2 at 240k" has the measurement. Numbers are `vllm bench serve` on an
+RTX 3090 at a 250 W power limit. If the card is yours alone, the fastest
+configuration is three environment variables away:
 [If you are the only user](#if-you-are-the-only-user-do-this).
 
 Prefill is a separate budget from either: ~1,810 tok/s at 1k inputs in batch
@@ -98,9 +101,12 @@ first token instead of 22.4 s, with the answers unchanged token for token.
 All of it is lossless: speculative decoding samples the same distribution as no
 speculation at all, the prefix cache resumes recurrent state rather than
 approximating it, and GSM8K reads 96.0-96.5% across the three columns. What
-`DFLASH_TOKENS=15` costs is half the request slots and 8k of context — that is
-the whole reason it is opt-in, and why the default stays where it is for anyone
-serving more than a few people. Every other knob: [single-user/](single-user/).
+`DFLASH_TOKENS=15` costs is half the request slots and 8k of context, because a
+16-token verify block doubles the recurrent-state page every resident request
+holds (1.66 GiB against 0.88) — so it is opt-in, and it is a one-user setting
+even by the standards of a mode that is already one-user
+(see [concurrency](#dflash2-at-240k-ctxhuge-kvarn-also-combines-with-specdflash2)).
+Every other knob: [single-user/](single-user/).
 
 ### DFlash2 at 240k: `CTX=huge` (KVarN) also combines with `SPEC=dflash2`
 
@@ -143,39 +149,37 @@ which is the property that was missing before `PIECEWISE` — see below.</sub>
 One caveat to the "all of it is lossless" paragraph above: the speculation here
 is still exact, but this mode inherits KVarN's 4/2-bit KV cache, which is lossy —
 the same trade `CTX=huge` already makes (deep-needle retrieval passes at 200k).
-On WSL2, set `VLLM_WSL2_ENABLE_PIN_MEMORY=1` — the V2 runner needs pinned
-memory, and vLLM leaves it off by default there; its UVA buffers work fine on
-the paravirt driver.
 
-One knob this mode sets for you: `cudagraph_mode=PIECEWISE`. Prefix caching and
-a *captured* (FULL) verify step do not currently mix on this path. On WSL2 that
-showed up as acceptance collapsing to about one token per step; on bare metal it
-also **corrupted the output** — special-token ids leaking into the stream, a
-different failure on every run, 1 of 1,176 characters matching the source
-instead of all of them. It is the capture rather than the drafter: eager is
-clean, `LOOKUP=0` is not, forcing a fixed verify-block length is not, and
+**On WSL2, every `SPEC=dflash2` profile needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`** —
+not just `CTX=huge`. The drafter's architecture forces vLLM's V2 model runner
+(`_is_dflash2_draft()` in `config/vllm.py`), the V2 runner allocates UVA buffers
+before the weights load, and vLLM leaves pinned memory off by default under WSL2,
+so a clean venv aborts with `RuntimeError: UVA is not available` before it prints
+anything model-shaped. Those buffers work fine on the paravirt driver. Note the
+name: `VLLM_WSL_PIN_MEMORY` is **not** a vLLM variable and setting it does
+nothing — this README named it for 22 minutes on 2026-08-21 (`589daae`, fixed in
+`27f51fa`), so a tree cloned in that window will have it.
+
+One knob this mode used to set for you, and now sets only for MTP:
+`cudagraph_mode=PIECEWISE`. Prefix caching and a *captured* (FULL) verify step
+did not mix on this path. On WSL2 that showed up as acceptance collapsing to
+about one token per step; on bare metal it also **corrupted the output** —
+special-token ids leaking into the stream, 1 of 1,176 characters matching the
+source instead of all of them. It is the capture rather than the drafter: eager
+is clean, `LOOKUP=0` is not, forcing a fixed verify-block length is not, and
 PIECEWISE — which keeps the compiled graphs and leaves only the multi-query
-verify uncaptured — restores both the speed and the correctness on both
-machines. So `CTX=huge` runs PIECEWISE and keeps prefix caching, which is worth
-having: turn 2 over a cached 100k document costs 4.7 s against 169 s cold.
+verify uncaptured — restored both the speed and the correctness on both machines.
 
-`CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches the capture back for anyone hunting
-the root cause. Treat that as unsafe rather than merely slower — the corruption
-above is what it does on bare metal.
+`dflash2` has its FULL graphs back (`a75ee4b` fixed the residue, `b356e31` then
+swept **all 128** residues under FULL with 0 broken), so at HEAD
+`SPEC=dflash2 CTX=huge PREFIX_CACHE=1` runs captured. `SPEC=mtp CTX=huge`
+still forces PIECEWISE, and that one is a correctness constraint rather than a
+preference: under FULL it breaks at one prompt length in 128 and nobody has
+fixed it. Either way prefix caching stays on, which is what the mode is for —
+turn 2 over a cached 100k document costs 4.7 s against 169 s cold.
 
-Two limits worth knowing before you point this at anything.
-**It is a single-user mode by configuration, and the knob is `MAX_SEQS`.** Fire 8
-concurrent requests at `CTX=huge` and the server runs **two**, with the other six
-queued — because this mode sets `MAX_SEQS=2`. That is a deliberate default for
-long-document sessions, not an engine limit and not a property of the block
-verify, so `MAX_SEQS=8` lifts it: peak 5 concurrent on the same 8-stream test,
-with the KV pool **unchanged at 268,169 tokens** (a recurrent-state slot costs
-~8 MiB, so the slots are close to free; what scales with the pool is the verify
-block length, not the slot count). Raising it grows the captured decode graphs,
-which is why the default stays low rather than because it would cost you context.
-And `DFLASH_TOKENS=15` does not boot at 240k on 24 GB — the pinned-buffer
-arithmetic in [docs/long-context.md](docs/long-context.md) says why — so
-reproduction mode and 240k are mutually exclusive; the default 7 is what runs.
+`CUDAGRAPH_MODE=FULL_AND_PIECEWISE` overrides the MTP line for anyone hunting
+the root cause. Treat that as unsafe rather than merely slower.
 
 It is a trade rather than a free win: dropping the full decode graphs costs
 short-prompt throughput. Same box, same script, only the capture toggled,
@@ -195,18 +199,94 @@ comparison costs 2-3x, reported in [#13](https://github.com/syv-ai/qwen38-27b-rt
 and consistent with the uncaptured verify being launch-bound: launches that are
 nearly free here are not free there.
 
-The capture mode is fixed at boot, so `CTX=huge` takes the trade that matches what
-it is for — **for every speculator, `mtp` included**. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`
-switches back; treat it as unsafe. What it does is corrupt one prompt length in
-every 128, and only for a request that hits the prefix cache: `dflash2` collapses
-to degenerate repetition, `mtp` stops dead and returns an empty answer. The broken residue is
-a function of the draft count (`R = 117 + k`, the same for both speculators),
-which is why scoping this workaround to `dflash2` was wrong — `SPEC=mtp CTX=huge`
-shipped with the same bug, and
-piecewise capture costs it nothing measurable (87.8/86.1/70.4/63.5 tok/s captured
-against 93.5/83.8/70.3/59.6 piecewise over 8k-50k). Gotcha 37 in
-[docs/gotchas.md](docs/gotchas.md) has the residue table and `bench/bugb_sweep.py`
-reproduces it; the hunt for the boundary case is in the PR thread.
+Two limits worth knowing before you point this at anything: what it does with
+more than one user, and what the long verify block costs.
+
+**It is a one-stream mode, and the limit is the pool rather than `MAX_SEQS`.** An
+earlier version of this paragraph said the knob was the seat count and that
+`MAX_SEQS=8` lifts it. It does not, and @mjungnickel18 was right to push back in
+[#25](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/25). A *resident* request
+reserves 1+k = 8 recurrent-state slots — **0.88 GiB, 15.8% of the 69,758-token
+`CTX=fast` pool** — before it holds one token of context. Seven fit with 128-token
+prompts, five with 4k-token ones and two with 16k ones. MTP's k=4 costs 0.44 GiB, so
+eight fit, four of them at 16k. Past that the extras queue, and once the pool is full
+something has to be preempted and recomputed to make room — a ramp of tiny requests
+hits that at the seventh. `MAX_SEQS` decides how many requests are *admitted*, not how
+many can run. The pool itself is **unchanged** by the setting (268,169 tokens at
+`CTX=huge` either way, ~8 MiB total between 1 slot and 8 —
+[gotcha 33](docs/gotchas.md)), which is the part of the old paragraph that was right.
+
+What concurrency actually costs, measured with `bench/conc_ladder.py` on distinct
+4k-token prompts — each salted so nothing is served out of the prefix cache — 256-token
+answers, `MAX_SEQS=8`, `CTX=fast`, 250 W:
+
+| streams | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| **dflash2** per-stream decode tok/s | 137 | 97 | 46 | 33 |
+| **dflash2** aggregate decode tok/s | 137 | 225 | 309 | *5 resident, no steady state* |
+| **dflash2** ms per forward pass | 25.9 | 32.8 | 49.1 | — |
+| **mtp** per-stream decode tok/s | 126 | 103 | 46 | 23 |
+| **mtp** aggregate decode tok/s | 124 | 212 | 280 | **383** |
+| **mtp** ms per forward pass | 24.8 | 29.8 | 43.1 | 62.3 |
+
+Two things to read off it. The verify step *does* batch — aggregate throughput keeps
+climbing for both speculators, and no preemption happens at any of these points — so
+"the block verify does not batch" is not what is going on. What it costs is latency:
+each additional resident request adds about 7 ms to every forward pass under DFlash2
+(5 ms under MTP), so the second user roughly halves your tokens per second and the
+fourth roughly quarters them. That 7 ms is not attention over their context — with
+128-token prompts the slope is the same (25.2 → 45.8 ms from one resident to four) —
+it is the per-request recurrent state, the same thing that limits residency. And MTP keeps scaling to 8 streams where DFlash2 runs
+out of pool at 5, which is the whole of its C8 advantage. Point one person at DFlash2;
+point a team at `SPEC=mtp` or batch mode.
+
+**On `CTX=huge`, raising `MAX_SEQS` is worse than not raising it.** That profile
+defaults to 2 seats, and the reason is the same 0.88 GiB state page against a smaller
+5.26 GiB pinned pool: five residents with a short prompt, four with a 16k one. Force it
+to 8 and feed it eight independent 16k-token streams and the scheduler starts evicting
+— **10 preemptions** in one run, peak occupancy 99.4%, per-stream 3 / 7 / 72 tok/s,
+end-to-end aggregate down to 10.3 from 13.0 at a single stream. An earlier version of
+this README recommended exactly that override. Leave the seats where they are.
+
+Make the streams long and independent and it stops being about decode at all. Eight
+16k-token prompts with nothing shared between them: end-to-end aggregate **15.8 tok/s**
+against 131 for a single stream, mean TTFT 71.7 s, two requests resident — but the
+decode-only aggregate over the same run is 183 tok/s, tokens per step is unchanged at
+3.71 and nothing is preempted. The run is 131k tokens of prompt at ~1,600 tok/s and
+2,048 tokens of answer, so it is a prefill measurement wearing a decode measurement's
+units, and `SPEC=mtp` reads the same 15.0-15.9 there. If your clients each bring their
+own long document, that is the number you get, and no speculator changes it —
+`PREFIX_CACHE=1` and a *shared* document do.
+
+`DFLASH_TOKENS=15` doubles the state page to 1.66 GiB: three residents with an empty
+context, **two** with 4k-token prompts, against five. That mode is single-user in the
+literal sense, and its launcher default of `MAX_SEQS=4` is already the tighter number —
+do not raise it. `DFLASH_TOKENS=15 MAX_SEQS=8` used to boot, answer `/health` and then
+die on the first concurrent batch (`torch.OutOfMemoryError` in the engine, every request
+500); the launcher now caps the captured-graph size so that configuration degrades to
+piecewise instead ([gotcha 38](docs/gotchas.md)). It does boot at 240k since `82bd62d`,
+which caps `max_model_len` to 221,184 above 7 drafts rather than letting the server fail
+to come up.
+
+
+The capture mode is fixed at boot, and for `SPEC=mtp CTX=huge` the trade is not
+optional. What FULL does there is corrupt one prompt length in every 128, and only
+for a request that hits the prefix cache. The broken residue is a function of the
+draft count (`R = 117 + k`, the same for both speculators), which is why scoping
+the workaround to `dflash2` was wrong the first time — `SPEC=mtp CTX=huge` shipped
+with the same bug at residue 4. Piecewise costs MTP nothing measurable
+(87.8/86.1/70.4/63.5 tok/s captured against 93.5/83.8/70.3/59.6 piecewise over
+8k-50k), so it keeps PIECEWISE until residue 4 comes back verbatim under a full
+sweep.
+
+**Do not test that residue by its symptom.** The location is deterministic and the
+damage is not: the same `mtp` residue has returned an empty answer, a one-character
+answer, and 400 tokens of fluent Danish inventing a task the prompt never asked for
+(2 of 1,146 characters matching the document). A detector keyed on "it repeats" or
+"it came back empty" passes at least one of those. Gotcha 37 in
+[docs/gotchas.md](docs/gotchas.md) has the residue table; `bench/residue_sweep.py`
+sweeps all 128 residues and judges every answer on how much of the document came
+back, and `bench/verbatim.py` self-tests that rule against all three shapes.
 
 ### More than one GPU
 
@@ -411,7 +491,10 @@ server and prints which attention backend and KV pool it came up with), then
 above against the running server (`--prefill` and `--long` add the prefill
 matrix and the long-context rows), `bash bench/real_rep.sh <tag> 3 0` repeats
 the single-stream row, and `python bench/quality_battery.py <tag>` the
-perplexity / GSM8K rows.
+perplexity / GSM8K rows. For the concurrency rows,
+`python bench/conc_ladder.py --n 1,2,4,8 --ctx-tokens 4096`; for the prompt-length
+bug, `python bench/residue_sweep.py <tag>` (all 128 residues) with
+`python bench/verbatim.py` as its offline self-test.
 
 ## The rest
 

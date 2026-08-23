@@ -246,8 +246,31 @@ if [ "$SPEC" = "dflash2" ]; then
     export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
   fi
   MAX_SEQS=${MAX_SEQS:-8}
-  # The V2 model runner captures decode graphs in multiples of k+1 tokens: cover MAX_SEQS requests.
-  CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1)))}
+  # The V2 model runner captures decode graphs in multiples of k+1 tokens: cover MAX_SEQS
+  # requests, but never ask for more than 64 query tokens' worth. Every default in this
+  # script lands on 64 or below (8x8 at k=7, 4x16 at k=15), and VLLM_V2_CUDAGRAPH_MEM_MIB
+  # above is sized for that. `DFLASH_TOKENS=15 MAX_SEQS=8` asks for 128, which boots and
+  # then dies on the first concurrent batch -- torch.OutOfMemoryError inside the engine,
+  # EngineDeadError, every request 500 while /health still answers. Past the cap the
+  # bigger batches run piecewise instead of captured: slower, alive. Set CG explicitly to
+  # override, and raise VLLM_V2_CUDAGRAPH_MEM_MIB with it.
+  CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1) > 64 ? 64 : MAX_SEQS * (DRAFT_TOKENS + 1)))}
+  # Seats are admissions, not residency. Every RESIDENT request needs 1+k recurrent-state
+  # slots out of the same pool before it stores one token of context: 0.88 GiB at
+  # DFLASH_TOKENS=7 and 1.66 GiB at 15 (gotcha 33), i.e. ~0.098 GiB per (k+2), which the
+  # ramp in bench/conc_ladder.py confirms live (15.8% of the CTX=fast pool per request,
+  # six resident, the seventh preempted). Print what the pool can actually hold so nobody
+  # reads MAX_SEQS as a concurrency setting -- raising it past this queues, and once the
+  # pool is full it preempts and recomputes.
+  if [ -n "$KV_MEM" ]; then
+    RESIDENT=$(( KV_MEM / ((DRAFT_TOKENS + 2) * 104988089) ))
+    [ "$RESIDENT" -lt 1 ] && RESIDENT=1
+    if [ "$MAX_SEQS" -gt "$RESIDENT" ]; then
+      echo "[start_qwen] note: the pinned pool holds about $RESIDENT resident requests at" \
+           "DFLASH_TOKENS=$DRAFT_TOKENS (state pages), fewer with long prompts;" \
+           "MAX_SEQS=$MAX_SEQS admits more than that and the rest queue."
+    fi
+  fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
 else
   MAX_SEQS=${MAX_SEQS:-8}
@@ -306,14 +329,20 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # so PIECEWISE now covers the whole of CTX=huge, not just dflash2. The old
   # claim here that forcing it "would cost decode for nothing" was wrong twice.
   # SPEC=mtp keeps PIECEWISE for CORRECTNESS, not preference. Do not "optimise" this
-  # away: under FULL, mtp at CTX=huge still returns an EMPTY answer at one prompt
-  # length in 128 -- templated length == L (mod 128), L = k+1 = 4 -- with a prefix
-  # cache hit. Measured on current main, fresh server, residues 3/4/5:
+  # away: under FULL, mtp at CTX=huge still breaks at one prompt length in 128 --
+  # templated length == L (mod 128), L = k+1 = 4 -- with a prefix cache hit. Measured on
+  # current main, fresh server, residues 3/4/5:
   #   residue 3   794/794    residue 4   0 chars, finish_reason=stop    residue 5   794/794
+  # The LOCATION is deterministic; the DAMAGE is not. The same residue has returned an
+  # empty answer here, a one-character answer, and -- on a third geometry (MAX_LEN=240000,
+  # tool parser attached) -- 400 tokens of fluent Danish inventing a translation task,
+  # 2 of 1146 characters matching the document. So do not test for a symptom; test
+  # whether the copy came back (bench/verbatim.py).
   # @mjungnickel18 found it by sweeping all 128 residues (127 clean, one broken, and it
   # is 4); an earlier version of this comment claimed mtp was "correct under FULL" on
-  # five sampled residues that did not include 4 -- five samples miss a single broken
-  # residue 82% of the time. a75ee4b fixed the same shape for dflash2 but does not
+  # five sampled residues that did not include 4 -- five distinct samples miss a single
+  # broken residue C(127,5)/C(128,5) = 123/128 = 96% of the time, not the 82% this
+  # comment used to say. a75ee4b fixed the same shape for dflash2 but does not
   # cover this path.
   #
   # dflash2 does get FULL, and to the same evidence standard: ALL 128 residues swept
@@ -321,9 +350,17 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # mtp claim was. On top of that FULL is 96.5% GSM8K against PIECEWISE's 95.0%, and
   # worth 2-3x under GPU passthrough (PR #13), where the uncaptured verify is
   # launch-bound rather than bandwidth-bound. THAT one is a preference and may be
-  # revisited; the mtp line above may not, until the empty answer at residue 4 is gone.
-  [ "$CTX" = "huge" ] && [ "$SPEC" != "dflash2" ] &&
+  # revisited; the mtp line above may not, until residue 4 comes back verbatim.
+  if [ "$CTX" = "huge" ] && [ "$SPEC" != "dflash2" ]; then
     CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
+  fi
+fi
+# An explicit CUDAGRAPH_MODE is honoured on every path, including dflash2, which
+# otherwise takes vLLM's default. Without this branch there was no way to ask a
+# dflash2 server for PIECEWISE, so the FULL-against-PIECEWISE comparison this repo
+# quotes could not be re-measured after a75ee4b changed what FULL does.
+if [ -n "${CUDAGRAPH_MODE:-}" ] && [ -z "${CG_MODE:-}" ]; then
+  CG_MODE=",\"cudagraph_mode\":\"$CUDAGRAPH_MODE\""
 fi
 
 # ASYNC_SCHED=0 (set above for a long DFlash2 verify block) runs the scheduler

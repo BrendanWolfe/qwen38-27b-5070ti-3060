@@ -13,6 +13,10 @@
 # prepare):
 #
 #   printf 'SPEC=dflash2\nDFLASH_TOKENS=15\nPREFIX_CACHE=1\n' >> .env
+#
+# On WSL2 add VLLM_WSL2_ENABLE_PIN_MEMORY=1 to that .env: SPEC=dflash2 forces vLLM's
+# V2 model runner, whose UVA buffers are refused there by default, and the container
+# aborts at "RuntimeError: UVA is not available" before loading weights (docs/docker.md).
 # PORT and MODELS_DIR are read here: models live in ./models by default
 # (the same layout as the venv install, so both can share one download).
 # One GPU: run either "single" or "batch", not both.

@@ -70,15 +70,25 @@ signatures and earlier five-profile matrix are in [issue #1](https://github.com/
 | `batch`, `KV=int4pth` | 437,414 tokens | 1,043.84 / 1,044.06 tok/s, C64 |
 | `batch`, `KV=kvarn` | 334,183 cold / 350,192 warm | 843.72 / 852.42 tok/s, C64 |
 
-Three WSL-specific memory behaviors are worth accounting for:
+Four WSL-specific memory behaviors are worth accounting for, and the first is a
+hard abort rather than a tuning question:
 
-1. **The ordinary batch default may fail vLLM's startup free-memory gate.**
+1. **`SPEC=dflash2` needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1` in `.env`, on every
+   `CTX` profile.** The DFlash2 drafter forces vLLM's V2 model runner, which
+   allocates UVA buffers before the weights load; vLLM leaves pinned memory off by
+   default under WSL2, so the container dies at `RuntimeError: UVA is not
+   available` before anything model-shaped appears in the log. The buffers work
+   fine on the paravirt driver. Check the spelling — `VLLM_WSL_PIN_MEMORY` is not
+   a vLLM variable and reads as a silent no-op; a venv that survived an upgrade on
+   hand-applied patches can hide this until it is rebuilt from a stock wheel
+   ([#25](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/25)).
+2. **The ordinary batch default may fail vLLM's startup free-memory gate.**
    On an otherwise clean card, WSL reported 22.75/24.0 GiB free, less than
    the 23.33 GiB requested by `GPU_UTIL=0.972`. Launching with
    `GPU_UTIL=0.93 bash batch/start_qwen.sh` retained a 201,832-token FP8
    pool, preserving the 150k context contract and expected C64 throughput.
    Keep 0.972 as the tuned native-Linux default; 0.93 is a WSL fallback.
-2. **Cold and cached starts can profile different activation peaks.** A warm
+3. **Cold and cached starts can profile different activation peaks.** A warm
    start may turn the difference into extra KV pages and leave less transient
    headroom than the cold start. For a deterministic service, compile once
    from a cold cache, record vLLM's conservative
@@ -88,7 +98,7 @@ Three WSL-specific memory behaviors are worth accounting for:
    `EXTRA_ARGS` on later starts. Stress concurrent prefill or
    `prompt_logprobs` before promoting it. Do not copy a byte value from a
    different card or profile.
-3. **`expandable_segments` can crash Marlin repack on some driver/dxgkrnl
+4. **`expandable_segments` can crash Marlin repack on some driver/dxgkrnl
    combinations.** Both start scripts default to
    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; its CUDA VMM calls
    crashed the engine with `RuntimeError: CUDA driver error: device not
