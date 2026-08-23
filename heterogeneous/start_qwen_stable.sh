@@ -19,7 +19,17 @@ PORT=${PORT:-18020}
 GPU_IDS=${GPU_IDS:-0,1}
 PP_LAYERS=${PP_LAYERS:-44,20}
 MAX_LEN=${MAX_LEN:-140000}
-MAX_SEQS=${MAX_SEQS:-4}
+# Eight scheduler slots, not four. Decode on this pair is bound by weight
+# bandwidth, so extra sequences ride along in the same step nearly for free:
+# 4 -> 8 slots is +41% aggregate throughput at eight concurrent streams
+# (213.9 -> 301.0 tok/s) and changes nothing at one to four (73.0/115.7/213.9
+# against the four-slot 73.1/120.8/212.7). The only cost is CUDA graph memory,
+# 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the ~1 GiB pool swing between
+# identical starts is rank 1's profiled activation peak (0.32 or 1.24 GiB) and
+# is unrelated to this. Past eight the curve flattens but latency does not:
+# C12 is +13% for 82 ms ITL, C16 is +28% for a ~3 s TTFT. See
+# heterogeneous/README.md.
+MAX_SEQS=${MAX_SEQS:-8}
 # Leave enough unprofiled memory for compiled prefill workspaces. At 0.93 a
 # 5k-token harness request could need another 56 MiB, OOM a PP worker, and
 # strand its peers. 0.91 still supports the required 131k context.

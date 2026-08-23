@@ -19,7 +19,17 @@ PORT=${PORT:-18020}
 GPU_IDS=${GPU_IDS:-0,1}
 PP_LAYERS=${PP_LAYERS:-44,20}
 MAX_LEN=${MAX_LEN:-140000}
-MAX_SEQS=${MAX_SEQS:-4}
+# Eight scheduler slots, not four. Decode on this pair is bound by weight
+# bandwidth, so extra sequences ride along in the same step nearly for free:
+# 4 -> 8 slots is +41% aggregate throughput at eight concurrent streams
+# (213.9 -> 301.0 tok/s) and changes nothing at one to four (73.0/115.7/213.9
+# against the four-slot 73.1/120.8/212.7). The only cost is CUDA graph memory,
+# 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the ~1 GiB pool swing between
+# identical starts is rank 1's profiled activation peak (0.32 or 1.24 GiB) and
+# is unrelated to this. Past eight the curve flattens but latency does not:
+# C12 is +13% for 82 ms ITL, C16 is +28% for a ~3 s TTFT. See
+# heterogeneous/README.md.
+MAX_SEQS=${MAX_SEQS:-8}
 # Leave enough unprofiled memory for compiled prefill workspaces. At 0.93 a
 # 5k-token harness request could need another 56 MiB, OOM a PP worker, and
 # strand its peers. 0.91 still supports the required 131k context.
@@ -31,11 +41,40 @@ ASYNC_SCHED=${ASYNC_SCHED:-1}
 SPEC=${SPEC:-mtp}
 DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 
-[ "$GPU_IDS" = "0,1" ] || echo "WARN: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES; verify the faster/larger card is first." >&2
+[ "$GPU_IDS" = "0,1" ] || echo "INFO: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES, not by physical device id. GPU_IDS=1,0 is the reversed pipeline used by start_qwen_fast.sh (drafter and LM head on the 5070 Ti); anything else, verify the split is what you meant." >&2
 [ "$PP_LAYERS" = "44,20" ] || echo "INFO: using custom pipeline layer partition $PP_LAYERS (must total 64)." >&2
 
 if [ "$KV" = "bf16" ]; then
+  # The fastest KV mode for DFlash2, and not because it is the most accurate.
+  # Under spec-decode vLLM consults the attention backend's AttentionCGSupport:
+  # FlashInfer (which fp8 forces here) reports UNIFORM_SINGLE_TOKEN_DECODE and is
+  # downgraded to piecewise CUDA graphs, while FLASH_ATTN keeps FULL_AND_PIECEWISE.
+  # BF16 is what selects FLASH_ATTN on this hardware, since FlashAttention cannot
+  # take fp8 on sm120/sm86. Costs density (4 KB/token/layer, so ~a third less pool
+  # than fp8) and nothing else. See heterogeneous/README.md.
   KV_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
+elif [ "$KV" = "int4pth" ]; then
+  # ~1 KB/token/layer against fp8's 2 KB, so the pool roughly doubles and the
+  # model's native 262,144 fits. vLLM's per-token-head quant modes live only in
+  # the Triton attention backend, which is markedly slower than FlashInfer at
+  # long context -- this is a mode for requests that would not otherwise fit,
+  # not a faster one. See docs/long-context.md and heterogeneous/README.md.
+  KV_ARGS="--attention-backend TRITON_ATTN --kv-cache-dtype int4_per_token_head"
+elif [ "$KV" = "fp8fa" ]; then
+  # FP8 KV on FlashAttention: half BF16's 4 KB/token/layer, and unlike the
+  # per-token-head modes it does not force the slower Triton backend. This is
+  # the DFlash2 density option that keeps prefill fast.
+  KV_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype fp8"
+elif [ "$KV" = "int8pth" ]; then
+  # The fastest KV mode for speculative decoding on this pair, and not for the
+  # reason the name suggests. Under spec-decode vLLM consults the attention
+  # backend's AttentionCGSupport: FlashInfer reports UNIFORM_SINGLE_TOKEN_DECODE,
+  # so an fp8 run is silently downgraded to piecewise CUDA graphs, while
+  # TRITON_ATTN reports ALWAYS and keeps FULL_AND_PIECEWISE. Triton cannot take
+  # plain fp8 here (native fp8e4nv needs SM89+; the 3060 is sm86), but
+  # int8_per_token_head is not gated -- so it is the only dense-KV mode that keeps
+  # full graphs on both cards. Costs some prefill speed; see heterogeneous/README.md.
+  KV_ARGS="--attention-backend TRITON_ATTN --kv-cache-dtype int8_per_token_head"
 else
   KV_ARGS="--kv-cache-dtype fp8"
 fi
