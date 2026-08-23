@@ -111,8 +111,16 @@ else
 fi
 
 export PATH="$REPO/venv/bin:$PATH"
-# Overridable for WSL2 (see single-user/start_qwen.sh).
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# Off under WSL, where the VMM calls break Marlin repack — see the long note in
+# single-user/start_qwen.sh. Overridable both ways.
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+  ALLOC_DEFAULT=expandable_segments:False
+  [ -z "${PYTORCH_CUDA_ALLOC_CONF:-}" ] && echo \
+    "WSL detected: PYTORCH_CUDA_ALLOC_CONF=$ALLOC_DEFAULT (VMM breaks Marlin repack under the paravirt driver; set it explicitly to override)"
+else
+  ALLOC_DEFAULT=expandable_segments:True
+fi
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-$ALLOC_DEFAULT}
 # flashinfer's sampling.cu does not build with older system nvcc (12.0);
 # the attention kernels JIT fine. Remove this if you have a recent CUDA toolkit.
 export VLLM_USE_FLASHINFER_SAMPLER=0

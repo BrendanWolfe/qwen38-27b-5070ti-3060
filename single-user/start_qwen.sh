@@ -413,11 +413,44 @@ else
   VISION_ARGS="--language-model-only"
 fi
 
+# fp16 activations do not work with the speculative path, and every way of finding
+# that out is late and cryptic (#27): the split-KV verify kernel hardcodes
+# tl.bfloat16 for the query cast and the dot accumulate
+# (patches/spec-decode-attn.patch), so it fails to *compile* at first attention with
+# "Both operands must be same dtype. Got bf16 and fp16"; disable it with SPEC_ATTN=0
+# and you get as far as the first sample, where the rejection sampler dies on a
+# device-side assert. Neither message names the dtype you set. Say so here instead.
+# This is a limitation of this repo's kernels, not of the checkpoint -- an fp16
+# target is fine with SPEC=none.
+case " ${EXTRA_ARGS:-} " in
+  *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
+    if [ "${SPEC:-mtp}" != "none" ]; then
+      echo "--dtype float16 needs SPEC=none: this repo's speculative kernels are bf16-only." >&2
+      echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
+      echo "  and the rejection sampler asserts device-side under fp16. See issue #27." >&2
+      exit 1
+    fi ;;
+esac
+
 export PATH="$REPO/venv/bin:$PATH"
-# Overridable: expandable_segments needs CUDA VMM, which WSL2's paravirt
-# driver rejects ("CUDA driver error: device not ready" during Marlin repack)
-# — set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False in .env on WSL2.
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# expandable_segments needs CUDA VMM, which WSL2's paravirt driver rejects during
+# Marlin repack. It is the single most reported failure on Windows (#2, #26) and it
+# does not announce itself as an allocator problem -- the same VMM rejection surfaces
+# as "CUDA driver error: device not ready", "CUDA driver error: out of memory" (on a
+# card with 23 GiB free for a 16 GiB model) or a torch stable-ABI error out of
+# aten::empty, with dmesg carrying "dxgkio_make_resident: Ioctl failed: -12". So
+# detect WSL and default it off there rather than documenting a workaround: three
+# separate reporters found the note in docs/docker.md only after losing a day.
+# Still overridable both ways, and untouched on native Linux, where gotcha 3 applies
+# and turning it off costs you the top of the GPU_UTIL range.
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+  ALLOC_DEFAULT=expandable_segments:False
+  [ -z "${PYTORCH_CUDA_ALLOC_CONF:-}" ] && echo \
+    "WSL detected: PYTORCH_CUDA_ALLOC_CONF=$ALLOC_DEFAULT (VMM breaks Marlin repack under the paravirt driver; set it explicitly to override)"
+else
+  ALLOC_DEFAULT=expandable_segments:True
+fi
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-$ALLOC_DEFAULT}
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then
