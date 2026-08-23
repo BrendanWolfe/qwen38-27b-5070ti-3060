@@ -103,7 +103,7 @@ speculation at all, the prefix cache resumes recurrent state rather than
 approximating it, and GSM8K reads 96.0-96.5% across the three columns. What
 `DFLASH_TOKENS=15` costs is half the request slots and 8k of context, because a
 16-token verify block doubles the recurrent-state page every resident request
-holds (1.66 GiB against 0.88) — so it is opt-in, and it is a one-user setting
+holds (1.66 GiB against 0.88 by the gotcha-33 fit) — so it is opt-in, and it is a one-user setting
 even by the standards of a mode that is already one-user
 (see [concurrency](#dflash2-at-240k-ctxhuge-kvarn-also-combines-with-specdflash2)).
 Every other knob: [single-user/](single-user/).
@@ -216,8 +216,9 @@ more than one user, and what the long verify block costs.
 earlier version of this paragraph said the knob was the seat count and that
 `MAX_SEQS=8` lifts it. It does not, and @mjungnickel18 was right to push back in
 [#25](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/25). A *resident* request
-reserves 1+k = 8 recurrent-state slots — **0.88 GiB, 15.8% of the 69,758-token
-`CTX=fast` pool** — before it holds one token of context. Seven fit with 128-token
+reserves 1+k = 8 recurrent-state slots — **15.8% of the 69,758-token `CTX=fast` pool**,
+~0.82 GiB of its pinned 5.20, which is the 0.88 GiB [gotcha 33](docs/gotchas.md) fitted
+from the memory model — before it holds one token of context. Seven fit with 128-token
 prompts, five with 4k-token ones and two with 16k ones. MTP's k=4 costs 0.44 GiB, so
 eight fit, four of them at 16k. Past that the extras queue, and once the pool is full
 something has to be preempted and recomputed to make room — a ramp of tiny requests
@@ -251,12 +252,14 @@ out of pool at 5, which is the whole of its C8 advantage. Point one person at DF
 point a team at `SPEC=mtp` or batch mode.
 
 **On `CTX=huge`, raising `MAX_SEQS` is worse than not raising it.** That profile
-defaults to 2 seats, and the reason is the same 0.88 GiB state page against a smaller
-5.26 GiB pinned pool: five residents with a short prompt, four with a 16k one. Force it
+defaults to 2 seats, and the reason is the same state page against a smaller pinned pool
+(4.90 GiB): five residents with a short prompt, four with a 16k one. Force it
 to 8 and feed it eight independent 16k-token streams and the scheduler starts evicting
 — **10 preemptions** in one run, peak occupancy 99.4%, per-stream 3 / 7 / 72 tok/s,
-end-to-end aggregate down to 10.3 from 13.0 at a single stream. An earlier version of
-this README recommended exactly that override. Leave the seats where they are.
+end-to-end aggregate down to 10.3 from 13.0 at a single stream. The same eight streams
+against the shipped 2 seats: **0 preemptions and 14.4 tok/s**, i.e. 40% more work done
+by admitting fewer requests. An earlier version of this README recommended exactly that
+override. Leave the seats where they are.
 
 Make the streams long and independent and it stops being about decode at all. Eight
 16k-token prompts with nothing shared between them: end-to-end aggregate **15.8 tok/s**
@@ -265,8 +268,21 @@ decode-only aggregate over the same run is 183 tok/s, tokens per step is unchang
 3.71 and nothing is preempted. The run is 131k tokens of prompt at ~1,600 tok/s and
 2,048 tokens of answer, so it is a prefill measurement wearing a decode measurement's
 units, and `SPEC=mtp` reads the same 15.0-15.9 there. If your clients each bring their
-own long document, that is the number you get, and no speculator changes it —
-`PREFIX_CACHE=1` and a *shared* document do.
+own long document, that is the number you get, and no speculator changes it.
+
+What *does* change it is sharing the document. The same eight 16k streams with one
+shared prefix and `PREFIX_CACHE=1` (`bench/conc_ladder.py --shared`):
+
+| streams | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| end-to-end aggregate tok/s | 15.5 | 128.4 | **147.8** | 68.3 |
+| mean TTFT | 14.6 s | 1.3 s | 2.6 s | 11.5 s |
+
+One stream pays the prefill; everyone after it hits the cache, and four concurrent
+readers of the same document get 148 tok/s end-to-end against 15.9 when the documents
+differ. That is the shape of workload this mode is for — a chat client or a coding
+front-end against one codebase — and it is nearly a 10x difference from the same server
+on the same prompt length.
 
 `DFLASH_TOKENS=15` doubles the state page to 1.66 GiB: three residents with an empty
 context, **two** with 4k-token prompts, against five. That mode is single-user in the

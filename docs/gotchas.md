@@ -230,7 +230,8 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 
     That is about the SIZE of the pool. It says nothing about how much of the pool a
     *running* request takes, and there the per-request model is right — it is the same
-    0.88 GiB. Measured live at `CTX=fast` (`bench/conc_ladder.py`, and the ramp in the
+    page, and the two arrive at it independently (0.88 GiB fitted here, ~0.82 GiB from
+    the live occupancy below). Measured live at `CTX=fast` (`bench/conc_ladder.py`, and the ramp in the
     issue-25 notes): one resident `dflash2` request with an empty context occupies
     **15.8%** of the 69,758-token pool, so six or seven fit and the next one is
     **preempted**; with 4k-token prompts it is 19.8% and five fit, with 16k-token

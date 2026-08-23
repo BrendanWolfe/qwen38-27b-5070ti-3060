@@ -89,8 +89,8 @@ happens when the streams are big. Where it is *not* the better choice:
 
 - **More than one stream at a time**, and the cohort table above does not show it
   because those eight prompts are 45-300 tokens each. Every resident request reserves
-  1+k = 8 recurrent-state slots — **0.88 GiB, 15.8% of the 69,758-token pool**, before
-  it holds one token of context — against 0.44 GiB for MTP k=4. So seven DFlash2
+  1+k = 8 recurrent-state slots — **15.8% of the 69,758-token pool**, ~0.82 GiB of its
+  pinned 5.20, before it holds one token of context — against 8.2% for MTP k=4. So seven DFlash2
   requests are resident with 128-token prompts, five with 4k-token ones and two with
   16k ones; the extras queue, and once the pool is full something has to be preempted
   and recomputed to make room. Eight MTP requests fit, four of them at 16k. Measured

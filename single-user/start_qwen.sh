@@ -187,7 +187,7 @@ if [ "$SPEC" = "dflash2" ]; then
   # count: 1 slot and 8 slots differ by about 8 MiB in total, so cutting MAX_SEQS buys no
   # context. Single-user mode keeps 4 slots when the block is long for the graphs.
   if [ "$CTX" = "huge" ]; then
-    # KVarN pool: ~20 KB/token effective. 5.26 GiB pinned -> 268,169 tokens of
+    # KVarN pool: ~20 KB/token effective. 4.90 GiB pinned -> 268,169 tokens of
     # KV at 245760 max-model-len with 2 slots (single-user long-context; the
     # graphs stay at the k=7 size).
     MAX_SEQS=${MAX_SEQS:-2}
