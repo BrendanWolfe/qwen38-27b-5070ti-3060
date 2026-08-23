@@ -7,17 +7,19 @@
 # other MTP profiles (bench/real_rep.sh, 8 realistic 1,024-token prompts at
 # concurrency 1, greedy):
 #
-#   profile              KV       slots  ctx    pool      decode
-#   start_qwen_solo.sh   KVarN      1    262k   296,974   72.4-73.6 tok/s, 34.8-35.4 ms/step
-#   start_qwen_batch.sh  fp8        8    147k   147,456+  73.6-75.5 tok/s
-#   start_qwen_huge.sh   int4pth    4    262k   284,234   batch only (~112 tok/s prefill at depth)
+#   profile                KV       slots  ctx    pool      decode
+#   start_qwen_solo.sh     KVarN      1    262k   296,974   72.4-73.6 tok/s, 34.8-35.4 ms/step
+#   start_qwen_batch.sh    fp8        8    147k   147,456+  73.6-75.5 tok/s
+#   KV=int4pth MAX_SEQS=4  int4pth    4    262k   284,234   batch only (~112 tok/s prefill at depth)
 #
 # Against batch that is roughly twice the pool and 115k more context at the same
 # decode rate and the same tokens/step (2.48-2.52 against 2.51-2.62) -- for ONE
 # stream. FP8 cannot reach this context at any MAX_LEN; it refuses above ~148k.
-# It also holds a larger pool than start_qwen_huge.sh at the same 262,144
-# context (296,974 against 284,234), so if you want the native context on a
-# single stream this is the better of the two; huge keeps 4 slots.
+# It also holds a larger pool at the same 262,144 context than the int4
+# per-token-head mode this profile replaced (296,974 against 284,234), so if
+# you want the native context on a single stream this is the better of the two;
+# int4pth is still reachable as KV=int4pth MAX_SEQS=4 on start_qwen.sh, and
+# keeps its 4 slots.
 #
 # WHY THE FULL 262,144, AND WHY THAT IS NOT OBVIOUS. The pool is memory divided
 # by bytes-per-token; MAX_LEN only caps the longest single request. What is NOT

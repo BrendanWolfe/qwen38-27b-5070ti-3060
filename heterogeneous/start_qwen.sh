@@ -80,15 +80,16 @@ elif [ "$KV" = "kvarn" ]; then
   #   KV=kvarn  32k  MAX_SEQS=1   171,239-token pool   74.6 tok/s, 35.2 ms/step
   #   KV=kvarn  32k  MAX_SEQS=8    78,220-token pool
   #   KV=fp8   147k  MAX_SEQS=8   147,456-token floor  73.6-75.5 tok/s (batch)
-  #   KV=int4pth 262k MAX_SEQS=4  284,234-token pool   (start_qwen_huge.sh)
+  #   KV=int4pth 262k MAX_SEQS=4  284,234-token pool
   #
   # So at one slot KVarN beats the batch profile's pool at matching decode, and
   # at eight it holds half of it: KVarN forces a 2048-token attention block to
   # match the GDN page, and every scheduler slot pays a full aligned page. The
   # density win is real per token and is spent on slots. At 262k with 4 slots it
   # does not fit at all (2.48 GiB of pool against the 2.52 GiB one request
-  # needs), so int4pth keeps start_qwen_huge.sh. Kept as a documented option
-  # for a single-stream long-context server, not wired into a profile.
+  # needs), so four-slot 262k stays int4pth territory: KV=int4pth MAX_SEQS=4
+  # here, which is what start_qwen_huge.sh wrapped before start_qwen_solo.sh
+  # replaced it. KVarN is wired into that profile; int4pth is an override only.
   #
   # NOTE this mode is only usable at all because of kvarn/kvarn-pp-pool-budget.patch:
   # stock KVarN charges rank 0 the whole checkpoint and pins max_num_seqs to 1.

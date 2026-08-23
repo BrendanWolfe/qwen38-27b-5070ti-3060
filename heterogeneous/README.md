@@ -6,14 +6,13 @@ consumer GPUs**: a 16 GiB RTX 5070 Ti (`sm120`, CUDA logical device 0) and a
 repository's fast model variant, and both speculative decoders (MTP and
 DFlash2).
 
-Five setups are supported:
+Four setups are supported:
 
 | profile | launcher | speculation | KV | context | measured decode |
 |---|---|---|---|---|---|
 | batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 147k (147,456-token pool floor) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
 | solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
 | DFlash2 / long | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
-| huge context | `start_qwen_huge.sh` | MTP-3, int4 per-token-head KV | int4 | **262k** (284,234-token pool) | batch only — ~112 tok/s prefill at depth |
 | fastest DFlash2 | `start_qwen_dflash2_fast.sh` | DFlash2-7, reversed 24/40 | bf16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 
 `start_qwen.sh` is the shared, tunable launcher every profile wraps.
@@ -73,10 +72,9 @@ free, use it; nothing here depends on it.
   manually sized cache, eager drafter; see below).
 - `heterogeneous/start_qwen_solo.sh` — 262k single-stream KVarN MTP profile
   (one scheduler slot, 4-bit keys / 2-bit values).
-- `heterogeneous/start_qwen_huge.sh` — 262k int4 per-token-head KV profile.
 - `heterogeneous/start_qwen_dflash2_fast.sh` — reversed-pipeline FP8 DFlash2;
   strictly better than `start_qwen_dflash2.sh`.
-- `heterogeneous/llama-swap.example.yaml` — the two llama-swap model entries.
+- `heterogeneous/llama-swap.example.yaml` — the four llama-swap model entries.
 - `patches/vllm-pr46994-mtp-pp.patch` — MTP + pipeline parallelism (below).
 - `patches/vllm-pr52297-gdn-common-metadata.patch` — upstream PR #52297,
   backported. No measurable speed change here, but +6.2% KV pool; see
@@ -431,7 +429,13 @@ TTFT at **2,955 ms** as 64 prompts queue behind a 2,048-token prefill budget.
 `MAX_SEQS=16` is the right override for batch or throughput work, where TTFT
 does not matter; it costs nothing at low load.
 
-### 262k, the full native context
+### 262k on int4 per-token-head KV
+
+This is the route to the full native context that `start_qwen_solo.sh`
+replaced. It no longer has a launcher of its own; reach it with
+`KV=int4pth MAX_LEN=262144 MAX_SEQS=4 bash heterogeneous/start_qwen.sh`. It is
+still the only 262k shape here that keeps four scheduler slots, which is the
+one thing solo gives up, so the measurements stay.
 
 `--kv-cache-dtype int4_per_token_head --attention-backend TRITON_ATTN` holds a
 **284,234-token pool** at `MAX_LEN=262144`, which FP8 cannot reach at any
@@ -463,10 +467,15 @@ Use `start_qwen_batch.sh` as the general server and switch to this only when a
 request will not fit, and only when you can wait.
 
 KVarN (`kvarn/`, `CTX=huge` in single-user mode) is denser still — ~840 B per
-token per layer against int4 per-token-head's ~1 KB — but it has never been run
-on the V2 model runner that MTP+PP requires, and its builder-owner registry is
-written against the V1 metadata path. That is the next thing to try for this
-profile, not a drop-in.
+token per layer against int4 per-token-head's ~1 KB. This section used to say
+it had never been run on the V2 model runner that MTP+PP requires and was "the
+next thing to try"; it has since been tried, and it works — that is
+`start_qwen_solo.sh`, a 296,974-token pool at the same 262,144 context. It cost
+`kvarn/kvarn-pp-pool-budget.patch`, and it buys the denser pool by dropping to
+a single scheduler slot: KVarN forces a 2048-token attention block to match the
+GDN page, and every slot pays a full aligned page. At four slots it does not
+fit at 262k at all, which is why the int4pth numbers above are still the
+four-slot answer.
 
 ### DFlash2: KV dtype, pipeline order and where the layers go
 
@@ -650,9 +659,6 @@ bash heterogeneous/start_qwen_dflash2.sh
 
 # Full native 262k context on ONE stream, at the batch profile's decode rate
 bash heterogeneous/start_qwen_solo.sh
-
-# Full native 262k context (slower; for requests that would not otherwise fit)
-bash heterogeneous/start_qwen_huge.sh
 
 # Known-correct non-speculative fallback
 SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh

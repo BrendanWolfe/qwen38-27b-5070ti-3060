@@ -1,7 +1,7 @@
 # Setup guide — RTX 5070 Ti + RTX 3060 (from zero to serving)
 
 Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
-**12 GiB RTX 3060**. By the end you will have five working profiles:
+**12 GiB RTX 3060**. By the end you will have four working profiles:
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
@@ -9,7 +9,6 @@ Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
 | `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
 | `start_qwen_dflash2.sh` | DFlash2, long context | **88k** (97,962-token pool) | FP8 | **~85 tok/s**, acceptance 3.26 |
 | `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
-| `start_qwen_huge.sh` | full native context | **262k** (284,234-token pool) | int4 | batch only — ~112 tok/s prefill at depth |
 
 Everything is driven by this fork (`BrendanWolfe/qwen38-27b-rtx3090`) of
 [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090) —
@@ -180,9 +179,8 @@ under `models:`. The entries:
 - `vllm-speed/qwen3.8-27b-dflash2-fast` — DFlash2 reversed pipeline, 32k at 97 tok/s
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 
-`start_qwen_huge.sh` is not wired in by default; add it the same way if you want
-the 4-slot 262k profile swappable too. If you rename a launcher, remember that
-llama-swap holds absolute paths — grep your live config, not just this repo.
+If you rename a launcher, remember that llama-swap holds absolute paths — grep
+your live config, not just this repo.
 
 Notes that matter:
 
