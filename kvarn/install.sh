@@ -14,6 +14,10 @@ patch -p1 -N -r /dev/null -d "$SP" < "$HERE/kvarn-0.27.1.patch" || true
 # V2-runner port: lets SPEC=dflash2 run with CTX=huge (KVarN KV + prefix caching, 240k).
 # Depends on hunks from both the patches/ set and kvarn-0.27.1.patch, hence applied last.
 patch -p1 -N -r /dev/null -d "$SP" < "$HERE/kvarn-v2-runner.patch" || true
+# Fork addition: size the fp16 tail-pool budget per PIPELINE rank. Without it
+# KVarN charges rank 0 the whole checkpoint, the post-weight envelope goes
+# negative, and max_num_seqs is pinned to 1 at any KVARN_POOL_MEM_FRAC.
+patch -p1 -N -r /dev/null -d "$SP" < "$HERE/kvarn-pp-pool-budget.patch" || true
 find "$SP" -type d -name __pycache__ -path "*kvarn*" -prune -exec rm -rf {} + 2>/dev/null || true
 "$PY" - "$SP" "$HERE" <<'PY'
 import sys

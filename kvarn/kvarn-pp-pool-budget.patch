@@ -1,0 +1,117 @@
+KVarN under pipeline parallelism: size the fp16 tail-pool budget per PP rank.
+
+KVarN caps max_num_seqs to whatever its fp16 tail pool budget supports, and that
+budget is share x (gpu_memory_utilization x total_gpu_bytes - weight_bytes). Two
+of those inputs describe a TENSOR-parallel rank rather than a pipeline one:
+
+  - estimate_weight_bytes(model, tensor_parallel_size=...) divides the checkpoint
+    by the TP degree, which is 1 here. Under PP=2 it therefore charges rank 0 the
+    entire 14.71 GiB checkpoint.
+  - num_kvarn_layers(model_config, parallel_config) asks for a generic rank's
+    full-attention layer count and cannot see an uneven VLLM_PP_LAYER_PARTITION.
+    On this repo's 44/20 split rank 0 really holds 11 of the 16 full-attention
+    layers, not 8.
+
+Measured on the RTX 5070 Ti (16,303 MiB) + RTX 3060 pair, 44/20, GPU_UTIL=0.91:
+
+  as shipped     usable-post-weight = 0.91 x 15.92 GiB - 14.71 GiB = -0.22 GiB
+                 -> pool_budget_bytes floors at max(0, ...) = 0
+                 -> max_num_seqs capped to 1
+  PP-aware       rank 0 holds 44/64 of the weights = 10.11 GiB
+                 -> usable-post-weight = 4.38 GiB, max_num_seqs 30 at frac 0.15
+
+The cap is therefore an artefact, not a memory limit, and it is silent about it:
+because the envelope is NEGATIVE the budget is zero at EVERY value of
+KVARN_POOL_MEM_FRAC, so the knob the warning message tells you to raise does
+nothing. Booting KV=kvarn on this pair pins the server to one request at a time
+whatever you set, which on a two-GPU box whose whole throughput story is
+concurrency (4.12x at 8 streams) is the difference between usable and not.
+
+The fix evaluates every pipeline rank on its own device -- its own NVML total,
+its own layer share of the weights, its own full-attention layer count taken
+from layer_types over that rank's slice -- and keeps the smallest result, which
+is the rank that actually binds. Any exception falls back to the as-shipped
+single-rank estimate, so a model this cannot reason about behaves as before.
+
+Embeddings and the LM head ride on the first and last rank and are NOT modelled;
+the split is by layer count alone. Keep KVARN_POOL_MEM_FRAC low enough to absorb
+that (heterogeneous/start_qwen.sh ships 0.15 against the code default of 0.5).
+
+Verified on this pair: the cap goes 4 -> 1 before and reports "supports
+max_num_seqs 49" after; MAX_SEQS=8 then boots, captures graphs and serves with
+no OOM. NOT verified: TP, PP > 2, or any other model.
+
+Applies to kvarn/kvarn-0.27.1.patch's block in platforms/cuda.py, so
+kvarn/install.sh applies it after that patch rather than the patches/*.patch
+loop. Written against vLLM 0.27.1.
+
+--- a/platforms/cuda.py
++++ b/platforms/cuda.py
+@@ -458,6 +458,67 @@
+                 gpu_memory_utilization=cache_config.gpu_memory_utilization,
+                 weight_bytes=weight_bytes,
+             )
++            # port(kvarn-pp): PP-aware pool budget. Two of the three inputs below
++            # describe a TENSOR-parallel rank, not a PIPELINE one:
++            # estimate_weight_bytes divides by tensor_parallel_size (1 here), and
++            # num_kvarn_layers asks parallel_config for a generic rank's share,
++            # which cannot see an uneven VLLM_PP_LAYER_PARTITION. On this repo's
++            # 44/20 split the as-shipped path charges rank 0 the whole 14.71 GiB
++            # checkpoint against a 16 GiB card, so util*total - weights goes
++            # NEGATIVE, pool_budget_bytes floors at 0, and max_num_seqs pins to 1
++            # at every value of KVARN_POOL_MEM_FRAC -- the knob the warning below
++            # tells you to raise is inert. Evaluate each pipeline rank on its own
++            # device and keep the smallest; that rank is the one that binds.
++            _pp = getattr(parallel_config, "pipeline_parallel_size", 1) or 1
++            _pp_supported = None
++            if _pp > 1 and weight_bytes is not None:
++                try:
++                    _n = int(getattr(hf_text_config, "num_hidden_layers"))
++                    _env = os.environ.get("VLLM_PP_LAYER_PARTITION")
++                    _parts = None
++                    if _env:
++                        _c = [int(x) for x in _env.split(",") if x.strip()]
++                        if len(_c) == _pp and sum(_c) == _n:
++                            _parts = _c
++                    if _parts is None:
++                        _b, _r = divmod(_n, _pp)
++                        _parts = [_b + (1 if i < _r else 0) for i in range(_pp)]
++                    _types = list(getattr(hf_text_config, "layer_types", None) or [])
++                    _lo = 0
++                    for _rank, _cnt in enumerate(_parts):
++                        _hi = _lo + _cnt
++                        if len(_types) == _n:
++                            _attn = sum(1 for t in _types[_lo:_hi] if t == "full_attention")
++                        else:
++                            _attn = max(1, round(kvarn_layers * _cnt / _n))
++                        _lo = _hi
++                        if _attn <= 0:
++                            continue
++                        # Weights split by layer count. Embeddings and the LM head
++                        # ride on the first/last rank and are NOT modelled, so keep
++                        # KVARN_POOL_MEM_FRAC low enough to absorb them (this repo
++                        # ships 0.15 against the 0.5 default).
++                        _s = kvarn_cfg.max_supported_seqs(
++                            total_gpu_bytes=cls.get_device_total_memory(_rank),
++                            num_kv_heads=model_config.get_num_kv_heads(parallel_config),
++                            num_layers=_attn,
++                            max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
++                            gpu_memory_utilization=cache_config.gpu_memory_utilization,
++                            weight_bytes=int(weight_bytes * _cnt / _n),
++                        )
++                        _pp_supported = _s if _pp_supported is None else min(_pp_supported, _s)
++                except Exception as _e:  # any surprise -> as-shipped behaviour
++                    logger.warning("KVarN: PP-aware pool budget failed (%s); "
++                                   "falling back to the single-rank estimate.", _e)
++                    _pp_supported = None
++            if _pp_supported is not None:
++                logger.info(
++                    "KVarN (%s): PP-aware pool budget over %d pipeline ranks "
++                    "(partition %s) supports max_num_seqs %d.",
++                    cache_dtype, _pp, os.environ.get("VLLM_PP_LAYER_PARTITION", "even"),
++                    _pp_supported,
++                )
++                supported = _pp_supported
+             if scheduler_config.max_num_seqs > supported:
+                 _budget_kind = ("post-weight usable memory"
+                                 if weight_bytes is not None else "total GPU memory")

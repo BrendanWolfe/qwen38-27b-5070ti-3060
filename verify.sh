@@ -50,9 +50,16 @@ grep -q "VLLM_MARLIN_INT8_INCLUDE_RE" "$SP/envs.py" 2>/dev/null && ok "int8 laye
 
 echo "== KVarN (optional, kvarn/)"
 if [ -f "$SP/v1/attention/backends/kvarn_attn.py" ]; then
-  if patch -p1 -R --dry-run -s -d "$SP" < kvarn/kvarn-0.27.1.patch >/dev/null 2>&1; then
+  # Reverse dry-run first, then the content check: kvarn-pp-pool-budget.patch also
+  # touches platforms/cuda.py, which disturbs the reverse hunk (same reason the
+  # DFlash2 pair above falls back to _check_applied.py).
+  if patch -p1 -R --dry-run -s -d "$SP" < kvarn/kvarn-0.27.1.patch >/dev/null 2>&1 \
+     || $PY patches/_check_applied.py kvarn/kvarn-0.27.1.patch "$SP" >/dev/null 2>&1; then
     $PY -c "from vllm.v1.attention.backends.registry import AttentionBackendEnum; AttentionBackendEnum.KVARN.get_class()" 2>/dev/null && ok "KVarN backend importable, patch applied (KV=kvarn / CTX=huge available)" || fail "KVarN files present but backend does not import"
   else fail "KVarN modules present but kvarn-0.27.1.patch not applied (bash kvarn/install.sh)"; fi
+  if grep -q "port(kvarn-pp)" "$SP/platforms/cuda.py" 2>/dev/null; then
+    ok "kvarn-pp-pool-budget.patch applied (KVarN max_num_seqs sized per PP rank)"
+  else warn "kvarn-pp-pool-budget.patch not applied — KVarN under PP will cap max_num_seqs to 1"; fi
   if $PY patches/_check_applied.py kvarn/kvarn-v2-runner.patch "$SP" >/dev/null 2>&1; then
     ok "kvarn-v2-runner.patch applied (SPEC=dflash2 + CTX=huge available)"
   else warn "kvarn-v2-runner.patch not applied (re-run bash kvarn/install.sh for DFlash2 at 240k)"; fi

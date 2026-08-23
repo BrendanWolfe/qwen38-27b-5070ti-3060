@@ -65,6 +65,35 @@ elif [ "$KV" = "fp8fa" ]; then
   # per-token-head modes it does not force the slower Triton backend. This is
   # the DFlash2 density option that keeps prefill fast.
   KV_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype fp8"
+elif [ "$KV" = "kvarn" ]; then
+  # KVarN 4-bit keys / 2-bit values per 128-token tile (kvarn/, run
+  # kvarn/install.sh once). 840 B/token/layer against fp8's 2048 and int4pth's
+  # ~1024, and unlike the per-token-head modes it is its own attention backend
+  # rather than a Triton-only cache dtype.
+  #
+  # This is the first configuration in which KVarN has run under MTP+PP at all
+  # (heterogeneous/README.md used to say it never had). It boots, serves and
+  # answers correctly. It is still NOT the right choice on this pair, and the
+  # reason is the per-slot cost rather than the per-token one -- measured, same
+  # bench/real_rep.sh as every other row:
+  #
+  #   KV=kvarn  32k  MAX_SEQS=1   171,239-token pool   74.6 tok/s, 35.2 ms/step
+  #   KV=kvarn  32k  MAX_SEQS=8    78,220-token pool
+  #   KV=fp8   140k  MAX_SEQS=8   155,978-token pool   73.6-75.5 tok/s (stable)
+  #   KV=int4pth 262k MAX_SEQS=4  284,234-token pool   (start_qwen_huge.sh)
+  #
+  # So at one slot KVarN beats the stable profile's pool at matching decode, and
+  # at eight it holds half of it: KVarN forces a 2048-token attention block to
+  # match the GDN page, and every scheduler slot pays a full aligned page. The
+  # density win is real per token and is spent on slots. At 262k with 4 slots it
+  # does not fit at all (2.48 GiB of pool against the 2.52 GiB one request
+  # needs), so int4pth keeps start_qwen_huge.sh. Kept as a documented option
+  # for a single-stream long-context server, not wired into a profile.
+  #
+  # NOTE this mode is only usable at all because of kvarn/kvarn-pp-pool-budget.patch:
+  # stock KVarN charges rank 0 the whole checkpoint and pins max_num_seqs to 1.
+  KV_ARGS="--kv-cache-dtype kvarn_k4v2_g128 --block-size 128"
+  export KVARN_POOL_MEM_FRAC=${KVARN_POOL_MEM_FRAC:-0.15}
 elif [ "$KV" = "int8pth" ]; then
   # The fastest KV mode for speculative decoding on this pair, and not for the
   # reason the name suggests. Under spec-decode vLLM consults the attention
@@ -82,6 +111,9 @@ fi
 PREFIX_ARGS=""
 if [ "$PREFIX_CACHE" = "1" ]; then
   PREFIX_ARGS="--enable-prefix-caching --mamba-cache-mode align"
+  # KVarN runs --block-size 128; the prefix hash unit must match its tile or
+  # cache hits land off a tile boundary and corrupt the pool.
+  [ "$KV" = "kvarn" ] && PREFIX_ARGS="--prefix-match-unit 128 $PREFIX_ARGS"
 fi
 ASYNC_ARGS=$([ "$ASYNC_SCHED" = "1" ] && echo --async-scheduling || echo --no-async-scheduling)
 
