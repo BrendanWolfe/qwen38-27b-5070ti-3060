@@ -30,10 +30,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
    layer set and dies with `KeyError: 'input_global_scale'`. Our patch
    registers the selection env vars with vLLM so they become part of the cache
    key; if you invent your own, `VLLM_DISABLE_COMPILE_CACHE=1`.
-6. **Random-token benchmarks flatter speculative decoding.** See the ninfer
-   section: the same server does 35, 83 or 151 tok/s on `--dataset-name random`
-   depending on what the noise turns into. Use real prompts
-   (`--dataset-name custom`).
+6. **Random-token benchmarks are meaningless for speculative decoding.** The same
+   server does 35, 83 or 151 tok/s on `--dataset-name random` depending on what
+   the noise turns into, because acceptance depends entirely on whether the
+   drafter can guess it. Use real prompts (`--dataset-name custom`). (This is our
+   own measurement, not a description of anyone else's harness — ninfer-3090's
+   published cohorts use short real prompts, not random tokens.)
 7. **Bigger prefill chunks make things worse.** `--max-num-batched-tokens
    8192` inflates the profiled activation peak, which shrinks the cache pool,
    which caps concurrency. 2048 wins on this card.
@@ -235,3 +237,107 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     binary search over `max_memory_usage_bytes`, which rounds up to whole blocks, so the
     estimate is quantised by the block size: at an 864-token block the granularity is coarse
     and a two-point inversion at small lengths is unreliable.
+35. **`KV_MEM` assumes the card is headless, and the failure lands long after
+    startup looks fine.** The single-user pool is pinned in bytes rather than sized
+    from `GPU_UTIL` (gotcha 33 and the comment in `single-user/start_qwen.sh` say
+    why), and 5.2 GiB is what fits when nothing else is on the GPU. With a desktop
+    session on the same card — Xorg plus a compositor plus a browser is easily
+    ~1.3 GiB — the server still starts, still captures its graphs, still reports a
+    pool, and then dies later on a real request when the spec-decode `part_o`
+    buffer cannot get its ~1.5 GiB (`spec_decode_attn.py`). Nothing at startup
+    warns you. On a card you also render on, drop `KV_MEM` by at least what the
+    desktop is holding (`nvidia-smi` before you start the server): `KV_MEM=4000000000`
+    was enough for the reporter of
+    [#12](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/12). Setting `KV_MEM=`
+    empty falls back to `GPU_UTIL`, which profiles the actual free memory instead.
+36. **A model dir with no `tokenizer.json` is not an error to transformers — it is an
+    empty vocabulary, and vLLM reports it as a reasoning-parser problem.**
+    `AutoTokenizer.from_pretrained` on a dir that has `config.json` but no tokenizer
+    files returns a `Qwen2Tokenizer` with `vocab_size == 1` that encodes *everything*
+    to `[]` — `tok.encode("hello world")` is `[]`, not an exception. Nothing complains
+    until `VllmConfig.__post_init__` asks the qwen3 reasoning parser for `<think>`,
+    gets `[]` back, and raises
+
+    ```
+    ReasoningConfig: failed to tokenize reasoning strings:
+    reasoning_start_str='', reasoning_end_str=''.
+    ```
+
+    which names neither the tokenizer nor the directory, and prints the strings as
+    empty because they are the *unset* config fields, not the ones the parser supplied.
+    Reported as [#15](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/15), where it
+    looked like a `SPEC=dflash2` bug: it reproduces with no speculative config at all,
+    and the reason only the single-user modes failed is that they serve
+    `models/Qwen3.8-27B-W4A16-AutoRound-fast` while batch mode serves the base dir.
+    `verify.sh` now encodes `<think>` against every dir we pass to `--model` instead of
+    only checking that the dir exists, and `docker/prepare.sh` counts `tokenizer.json`
+    as part of a complete download.
+37. **Bug B needs a prefix-cache HIT, and then fires at one prompt length in every
+    128. It is not dflash2-only.**
+    Under `CTX=huge` with a CAPTURED (FULL) verify step, a request that hits the
+    prefix cache and whose prompt length lands on one particular residue mod 128
+    collapses: `SPEC=dflash2 DFLASH_TOKENS=7` gives 1.97 tok/step and degenerate
+    repetition (`4/3595` characters verbatim, one 40-char block ×79), `SPEC=mtp`
+    stops dead and returns `""` or `"#"` with `finish_reason=stop`. Every other
+    residue is 794/794 verbatim. Deterministic — repeats are bit-identical.
+
+    Two conditions, and it took two people to see both. The **hit** is necessary:
+    a fresh server, one request, no warm-up, never collapses at any length
+    ([#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13), mjungnickel18) —
+    which is also why `PREFIX_CACHE=0` always looked clean. The **residue** decides
+    whether a hit corrupts, and it is a clean function of the draft count:
+
+    | config | k | verify block L=k+1 | attention block | broken R | free slots 128-R |
+    |---|---|---|---|---|---|
+    | `dflash2`, `DFLASH_TOKENS=7` | 7 | 8 | 2176 (=17x128) | 124 | 4 |
+    | `dflash2`, `DFLASH_TOKENS=5` | 5 | 6 | **2176** | **122** | 6 |
+    | `dflash2`, `DFLASH_TOKENS=3` | 3 | 4 | 2048 (=16x128) | 120 | 8 |
+    | `mtp`, `DRAFT_TOKENS=3` | 3 | 4 | 2048 | 120 | 8 |
+
+    **R = 117 + k**, equivalently the final 128-token tile has exactly `11 - k`
+    free slots, equivalently `L + free = 12` in every configuration measured.
+    Fitted on three values of k across two speculators, so treat the constant as a
+    fit rather than a derivation — but note what it implies: the step reserves or
+    touches a **fixed 12 slots regardless of the verify block length**, which is
+    the most specific lead this bug has produced.
+
+    The `DFLASH_TOKENS=5` row is the one that matters for method. Same attention
+    block as `DFLASH_TOKENS=7` (2176), different broken residue (122 against 124),
+    which rules out the attention block size. An earlier version of this entry
+    claimed R tracked the verify block on three points where the two co-varied;
+    that was retracted as unevidenced, and then confirmed by running the
+    configuration that separates them.
+
+    Confirmed periodic in every case: 24,956 / 25,084 / 25,212 / 25,340 at k=7,
+    25,082 / 25,210 / 25,338 at k=5, 25,080 / 25,208 / 25,336 at k=3. Hold the document
+    byte-identical and pad the *instruction* by one token and a broken length goes
+    clean, so it is the token count rather than the corpus. What is established: `mtp` and
+    `dflash2` at the same draft count break at the same residue, so the drafter is
+    not implicated and the shared multi-query verify against a partially-hit
+    prefix is.
+
+    Mitigation: `CTX=huge` forces `cudagraph_mode=PIECEWISE` for **every**
+    speculator, which is clean at every residue. It costs nothing measurable —
+    `SPEC=mtp` over 8k/16k/32k/50k is 87.8/86.1/70.4/63.5 tok/s captured against
+    93.5/83.8/70.3/59.6 piecewise. This repo previously scoped that workaround to
+    `dflash2` on the theory that MTP's short verify step captures correctly; it
+    does not, and `SPEC=mtp CTX=huge` shipped with the bug.
+
+    A third trap, learned the hard way on `DFLASH_TOKENS=15`: `bench/bugb_sweep.py`
+    used to report the RAW prompt length, not the chat-templated one the engine
+    actually sees (+12 tokens for the Qwen3 wrapper). That offset is why the rule
+    first read as `R = 117 + k` and then as a mysterious constant 12; both were the
+    same relation seen through a harness bug. It also made a k=15 sweep look
+    structureless until the offset was applied, at which point the lowest-acceptance
+    row sat exactly on `== L`. The script now templates before counting. And read
+    `repeats` next to `verbatim`: the verbatim column is a longest-prefix match, so a
+    single wrong character at offset 38 reports `38/791` no matter how good the rest
+    is -- only `repeats` tells you whether it actually collapsed.
+
+    Two traps for anyone measuring this. Sweep prompt length in steps of **1
+    token** — at a coarse grid one broken sample below and one above reads as a
+    cliff, which is how it was first diagnosed. And send each length to a **fresh
+    server**, or request N inherits request N-1's blocks and you measure history
+    instead of length; `bench/labd_bench.py` sends two warm-ups on `doc[:4000]`,
+    which arms the trigger for everything after it. `bench/bugb_sweep.py` prints
+    the `mod 128` column for this.

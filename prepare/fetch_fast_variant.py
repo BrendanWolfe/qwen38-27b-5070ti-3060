@@ -25,6 +25,12 @@ for f in ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "gen
           "processor_config.json", "quantization_config.json"]:
     if os.path.exists(os.path.join(S, f)) and not os.path.exists(os.path.join(D, f)):
         shutil.copy(os.path.join(S, f), os.path.join(D, f))
+# Stop here rather than assemble a dir that cannot be served: transformers treats a
+# missing tokenizer as an empty vocabulary instead of an error, and vLLM only notices
+# much later, as "ReasoningConfig: failed to tokenize reasoning strings".
+assert os.path.exists(os.path.join(D, "tokenizer.json")), (
+    f"no tokenizer.json in {S} — the base model dir is incomplete; re-run the download "
+    f"(README: Setup) before building the fast variant")
 hub = snapshot_download("syvai/qwen3.8-27b-3090-fast-variant",
                         allow_patterns=["model-00007-of-00007.safetensors", "model_extra_tensors.safetensors",
                                         "mtp_draft_vocab_ids.pt", "config.json", "model.safetensors.index.json"])

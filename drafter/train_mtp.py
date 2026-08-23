@@ -202,7 +202,13 @@ mtp = mtp.to(dev).float()
 idx = json.load(open(d + "model.safetensors.index.json"))["weight_map"]
 emb_shard = idx.get("model.language_model.embed_tokens.weight_packed") or idx.get("model.language_model.embed_tokens.weight")
 lm_shard = idx.get("lm_head.weight_packed") or idx.get("lm_head.weight")
-with safe_open(d + emb_shard + ".bak_embed", "pt") as f:
+# quant_embed.py briefly wrote ".bak"; accept that name too, but only when the two
+# shards differ -- if they are the same file, ".bak" is quant_lm_head.py's backup and
+# its embed_tokens is already packed.
+emb_bak = d + emb_shard + ".bak_embed"
+if not os.path.exists(emb_bak) and emb_shard != lm_shard:
+    emb_bak = d + emb_shard + ".bak"
+with safe_open(emb_bak, "pt") as f:
     emb_w = f.get_tensor("model.language_model.embed_tokens.weight").to(dev)     # bf16 [V,H]
 with safe_open(d + lm_shard + ".bak", "pt") as f:
     lm_w = f.get_tensor("lm_head.weight").to(dev)                                # bf16 [V,H]

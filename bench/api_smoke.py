@@ -7,7 +7,12 @@ thinking, prompt_logprobs, a 20k-token prompt). Prints PASS/FAIL per feature.
 import json, os, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
-KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(REPO, "api_key.txt")).read().strip()
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(REPO, "api_key.txt"))
 PORT = os.environ.get("PORT", "18020")
 URL = f"http://127.0.0.1:{PORT}/v1/chat/completions"
 URLC = f"http://127.0.0.1:{PORT}/v1/completions"

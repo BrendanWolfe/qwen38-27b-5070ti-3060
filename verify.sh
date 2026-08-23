@@ -53,6 +53,9 @@ if [ -f "$SP/v1/attention/backends/kvarn_attn.py" ]; then
   if patch -p1 -R --dry-run -s -d "$SP" < kvarn/kvarn-0.27.1.patch >/dev/null 2>&1; then
     $PY -c "from vllm.v1.attention.backends.registry import AttentionBackendEnum; AttentionBackendEnum.KVARN.get_class()" 2>/dev/null && ok "KVarN backend importable, patch applied (KV=kvarn / CTX=huge available)" || fail "KVarN files present but backend does not import"
   else fail "KVarN modules present but kvarn-0.27.1.patch not applied (bash kvarn/install.sh)"; fi
+  if $PY patches/_check_applied.py kvarn/kvarn-v2-runner.patch "$SP" >/dev/null 2>&1; then
+    ok "kvarn-v2-runner.patch applied (SPEC=dflash2 + CTX=huge available)"
+  else warn "kvarn-v2-runner.patch not applied (re-run bash kvarn/install.sh for DFlash2 at 240k)"; fi
 else warn "KVarN not installed (optional; bash kvarn/install.sh for 262k context)"; fi
 
 if [ $INSTALL = 0 ]; then
@@ -90,6 +93,37 @@ fi
 
 echo "== single-user fast variant (optional)"
 if [ -d "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then ok "fast variant present (int4-GPTQ lm_head/MTP, own-output draft vocab)"; else warn "no models/Qwen3.8-27B-W4A16-AutoRound-fast (venv/bin/python prepare/fetch_fast_variant.py; single-user mode is ~15% slower without it)"; fi
+
+if [ $INSTALL = 0 ]; then
+# A served model dir with no tokenizer.json is not an error to transformers: it hands
+# back a Qwen2Tokenizer with a 1-token vocabulary that encodes everything to []. The
+# server then dies far downstream on "ReasoningConfig: failed to tokenize reasoning
+# strings", which names neither the dir nor the tokenizer. Encode <think> here instead.
+echo "== tokenizers (every dir we serve --model from)"
+$PY - "$MODEL" "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" <<'EOF'
+import os, sys
+F = 0
+for d in sys.argv[1:]:
+    if not os.path.isfile(os.path.join(d, "config.json")):
+        continue
+    name = os.path.basename(d.rstrip("/"))
+    try:
+        from transformers import AutoTokenizer
+        ids = AutoTokenizer.from_pretrained(d).encode("<think>", add_special_tokens=False)
+    except Exception as e:
+        print(f"  FAIL  {name}: tokenizer will not load ({type(e).__name__}: {str(e)[:70]})"); F += 1; continue
+    if ids:
+        print(f"  PASS  {name}: tokenizer loads, <think> -> {ids}")
+    else:
+        print(f"  FAIL  {name}: no usable tokenizer in the dir (encodes everything to []). "
+              f"Copy tokenizer.json and tokenizer_config.json in from the base model dir, "
+              f"or re-run the download. Serving this dir fails with "
+              f"'ReasoningConfig: failed to tokenize reasoning strings'.")
+        F += 1
+sys.exit(1 if F else 0)
+EOF
+[ $? -ne 0 ] && FAILS=$((FAILS+1))
+fi
 echo "== single-user DFlash2 drafter (optional, SPEC=dflash2)"
 if [ -f "$HERE/models/Qwen3.8-27B-DFlash2-W4A16/config.json" ]; then
   $PY -c "import json,sys; c=json.load(open('$HERE/models/Qwen3.8-27B-DFlash2-W4A16/config.json')); assert c['architectures']==['DFlash2DraftModel'] and c['quantization_config']['quant_method']=='compressed-tensors'" 2>/dev/null && ok "DFlash2 drafter present, W4A16 (models/Qwen3.8-27B-DFlash2-W4A16)" || fail "models/Qwen3.8-27B-DFlash2-W4A16 is not a quantized DFlash2DraftModel checkpoint"
@@ -98,7 +132,11 @@ elif [ -f "$HERE/models/Qwen3.8-27B-DFlash2/config.json" ]; then warn "only the 
 else warn "no DFlash2 drafter (venv/bin/python prepare/fetch_dflash2.py; SPEC=dflash2 single-user mode needs it)"; fi
 
 echo "== keys / units"
-[ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" || fail "no api_key.txt (openssl rand -hex 24 > api_key.txt)"
+# A key is optional: with neither api_key.txt nor VLLM_API_KEY the launchers export
+# nothing and vLLM serves unauthenticated, which is a fine way to run this locally.
+# Worth a WARN rather than silence only because both launchers bind 0.0.0.0.
+[ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" \
+  || warn "no API key — the server will accept any request, and it listens on 0.0.0.0. Fine behind a firewall; otherwise: openssl rand -hex 24 > api_key.txt"
 if [ -f /.dockerenv ]; then :; elif systemctl --user is-active qwen-serving >/dev/null 2>&1; then ok "systemd user unit qwen-serving active"; else warn "qwen-serving unit not active (fine if you launch the scripts by hand)"; fi
 fi  # INSTALL
 

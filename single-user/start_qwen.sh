@@ -64,8 +64,9 @@ CTX=${CTX:-fast}
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
 #   to W4A16 by this repo: prepare/fetch_dflash2.py), 7 drafts in ONE non-autoregressive
 #   pass + a path selector; runs on vLLM's V2 model runner
-#   (patches/dflash2-backport.patch). CTX=fast only (bf16 KV / FLASH_ATTN; the
-#   drafter's block attention is non-causal); see README "DFlash2".
+#   (patches/dflash2-backport.patch). CTX=fast (bf16, 64k), CTX=long (int8,
+#   128k) or, with kvarn/install.sh, CTX=huge (KVarN 4/2-bit, 240k + prefix
+#   caching); see README "DFlash2".
 SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
@@ -96,8 +97,14 @@ if [ "$SPEC" = "dflash2" ] && [ "$CTX" = "long" ]; then
   # mode for a RAG or coding front-end that loads a document once, not for general chat.
   ATTN_ARGS="--attention-backend TRITON_ATTN --kv-cache-dtype int8_per_token_head"
   export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+elif [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ]; then
+  # KVarN 4/2-bit KV on the V2 runner (kvarn/, with kvarn-v2-runner.patch as its
+  # second stage): the pinned pool holds 268k tokens at 245760 max-model-len.
+  # The split-KV verify attention is bf16-KV only -- the KVarN backend brings
+  # its own dequant path, so the env stays off here.
+  export VLLM_SPEC_DECODE_ATTN=0
 elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ]; then
-  echo "SPEC=dflash2 supports CTX=fast (bf16/FLASH_ATTN, 64k) and CTX=long (int8/TRITON_ATTN, 128k); CTX=$CTX keeps SPEC=mtp" >&2
+  echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k) and CTX=huge (KVarN, 240k; kvarn/install.sh); CTX=$CTX keeps SPEC=mtp" >&2
   SPEC=mtp
 fi
 if [ "$SPEC" = "dflash2" ]; then
@@ -128,6 +135,37 @@ if [ "$SPEC" = "dflash2" ]; then
   # buffers once for the longest query block it will see -- a captured CUDA graph holds
   # their addresses, so they must not be grown later.
   export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((DRAFT_TOKENS + 1))}
+  # The ADAPTIVE verify length corrupts a prefix-cache hit under KVarN. When the block
+  # alternates 8<->16 step to step and the request resumed from a cache hit, turn 2 over
+  # the same document tracks the source for ~38 characters and then diverges -- turn 1 is
+  # correct. Deterministic, at five of six prompt residues tested.
+  #
+  # It is the length CHANGING, not the lookup content, and not the KVarN kernels. Fresh
+  # server per row, three requests each (one to arm the cache, two measured), sha-compared:
+  #   baseline, adaptive 8<->16          self-hit 38/793 WRONG   12.71 tok/step
+  #   VLLM_DFLASH2_LOOKUP_ADAPTIVE=0     self-hit 794/794 clean  14.71 tok/step
+  #   PREFIX_CACHE=0, adaptive on        self-hit 794/794 clean  14.33
+  #   KVARN_FUSED_VERIFY=0, adaptive on  self-hit 38/793 WRONG   12.71
+  # and the constant-length setting is clean at every residue that broke (16/64/96/124),
+  # cold and warm, byte-identical.
+  #
+  # Note what the earlier controls actually varied: DFLASH_TOKENS=7, LOOKUP=0 and SPEC=mtp
+  # all make the block a CONSTANT length, so "clean" there was never evidence about the
+  # block being short or the lookup being off. And a wrong draft cannot corrupt greedy
+  # output at all -- rejection_sampler.py emits target_argmax whether it accepts or not --
+  # so the draft content was never a candidate. The damage is on the target's forward.
+  #
+  # Pinning the length is not a sacrifice here: 14.71 tok/step is the FASTEST number in the
+  # series, above the adaptive path's own 14.29 cold. Root cause still open; this is a
+  # correct and fast setting, not a workaround with a cost.
+  if [ -z "${LOOKUP_ADAPTIVE:-}" ] && [ "$VLLM_DFLASH2_LOOKUP" = "1" ] && [ "$DRAFT_TOKENS" -gt 7 ] \
+     && [ "$CTX" = "huge" ] && [ "${PREFIX_CACHE:-0}" = "1" ]; then
+    echo "DFLASH_TOKENS>7 + CTX=huge + PREFIX_CACHE=1: pinning the verify block to" >&2
+    echo "$((DRAFT_TOKENS + 1)) tokens (VLLM_DFLASH2_LOOKUP_ADAPTIVE=0). The adaptive length" >&2
+    echo "corrupts the second turn over a shared prefix on the KVarN cache; pinned is both" >&2
+    echo "correct and faster. LOOKUP_ADAPTIVE=1 asks for the adaptive path anyway." >&2
+    export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0
+  fi
   if [ "$VLLM_DFLASH2_LOOKUP" = "1" ] && [ "$DRAFT_TOKENS" -gt 7 ]; then
     # Adaptive block length means the worker tells the scheduler how many draft tokens to
     # put up for verification next step, and vLLM only feeds that back on the synchronous
@@ -148,7 +186,36 @@ if [ "$SPEC" = "dflash2" ]; then
   # state page per speculative block. That second term is what scales -- NOT the slot
   # count: 1 slot and 8 slots differ by about 8 MiB in total, so cutting MAX_SEQS buys no
   # context. Single-user mode keeps 4 slots when the block is long for the graphs.
-  if [ "$CTX" = "long" ]; then
+  if [ "$CTX" = "huge" ]; then
+    # KVarN pool: ~20 KB/token effective. 5.26 GiB pinned -> 268,169 tokens of
+    # KV at 245760 max-model-len with 2 slots (single-user long-context; the
+    # graphs stay at the k=7 size).
+    MAX_SEQS=${MAX_SEQS:-2}
+    # 221184 rather than 245760 above 7 drafts, the same trade CTX=fast makes at
+    # DFLASH_TOKENS>7. The pinned pool is 4.90 GiB; one request at max_model_len needs
+    # 5.16 GiB at k=15, so the server refuses to start at 245760 -- "5.16 GiB KV cache is
+    # needed, which is larger than the available KV cache", which is the boot failure an
+    # independent 3090 Ti reported (PR #13). Raising the cudagraph reservation does NOT
+    # fix this and I checked: KV_MEM is pinned, so the pool does not grow when graph
+    # memory is accounted differently. 221184 = 1728 x 128 leaves ~2.6% margin (229376 was still 1% short).
+    if [ "$DRAFT_TOKENS" -gt 7 ]; then
+      MAX_LEN=${DFLASH_MAX_LEN:-221184}
+    else
+      MAX_LEN=${DFLASH_MAX_LEN:-245760}
+    fi
+    KV_MEM=${KV_MEM-5261334938}
+    # Above 7 drafts the decode graphs are captured for BOTH block lengths, which is
+    # ~1.8 GiB rather than ~1.45 -- the same arithmetic CTX=long and CTX=fast already
+    # branch on. This branch did not, and said so in a comment ("the graphs stay at the
+    # k=7 size") that stops being true the moment anyone sets DFLASH_TOKENS. The pool is
+    # then sized as if that memory were free and the server does not come up at 240k on
+    # 24 GB, which is what an independent 3090 Ti report hit (PR #13).
+    if [ "$DRAFT_TOKENS" -gt 7 ]; then
+      export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1900}
+    else
+      export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+    fi
+  elif [ "$CTX" = "long" ]; then
     # int8 KV: measured 136,429 tokens of pool at DFLASH_TOKENS=7 with prefix caching on
     # (138,696 without), against bf16's 69,758 in the same pinned 5.2 GiB. DFLASH_TOKENS>7
     # at this context is untested -- the graphs and the state pages both grow.
@@ -194,6 +261,69 @@ fi
 # per request (~16% of the KV pool). Hybrid models keep this opt-in upstream.
 if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
+  # KVarN runs --block-size 128; match the prefix hash unit to its tile so cache
+  # hits land on tile boundaries (a non-multiple of 128 corrupts the pool).
+  [ "$CTX" = "huge" ] && EXTRA_ARGS="--prefix-match-unit 128 ${EXTRA_ARGS}"
+  # DFlash2 only: prefix caching and a CAPTURED (FULL) verify step do not mix on
+  # that path. It is the capture, not the drafter: eager is clean, and so is
+  # PIECEWISE, which keeps the compiled graphs and leaves only the multi-query
+  # verify uncaptured.
+  #   long context, labd copy@20k   FULL 1.97 tok/step 38 tok/s
+  #                                 PIECEWISE 7.83 tok/step 132 tok/s   (3.5x)
+  #   short prompts, de/en/code     FULL 78/125/202 tok/s
+  #                                 PIECEWISE 74/102/176 tok/s          (-13..18%)
+  # Treat that -13..18% as an UPPER bound. @mjungnickel18 measures 0.2-2.3% for the
+  # same comparison on bare metal when only runs with identical STEP COUNTS are
+  # compared, and he is right that greedy runs which take a different number of steps
+  # are not comparable -- mine did not control for that. Unresolved: I have not
+  # re-measured with his method. The number that is not in dispute is the long-context
+  # one above, where the gap is 3.5x and no amount of step-count matching closes it.
+  # Read that -13..18% as SHORT PROMPTS ONLY. Past 8k the two modes are within
+  # noise on bare metal (8k/16k/32k/50k: 112/78/69/58 FULL vs 109/86/73/56
+  # PIECEWISE), so PIECEWISE is close to free at the lengths this mode is for.
+  # Under GPU passthrough on a VM it costs 2-3x instead (PR #13): the uncaptured
+  # verify is launch-bound, and launches are not free there.
+  # The capture mode is fixed at boot, so CTX=huge takes the trade. Treat
+  # CUDAGRAPH_MODE=FULL_AND_PIECEWISE as unsafe: what it does is corrupt one
+  # prompt length in every 128 (gotcha 37, bench/bugb_sweep.py), which a coarse
+  # sweep reads as a length threshold and a lucky sweep misses entirely.
+  # This is NOT dflash2-only, which is what we used to claim here. SPEC=mtp with
+  # CTX=huge captured FULL by default and has the same bug: at the residue that
+  # matches its 4-token verify block it stops immediately, returning "" or "#"
+  # with finish_reason=stop while every other residue is 794/794 verbatim. The
+  # broken residue is R = 117 + k: 124 at DFLASH_TOKENS=7, 122 at 5, 120 at 3,
+  # and the same 120 under mtp k=3. Equivalently the last 128-token tile has
+  # 11-k free slots, i.e. verify block + free = 12 in every config measured.
+  # k=5 is what rules out the attention block size as the driver -- same 2176
+  # block as k=7, different residue. mtp and dflash2 at the same draft count
+  # break identically, so the drafter is not implicated and every KVarN
+  # speculator reaches it. It also needs a prefix-cache HIT to
+  # fire at all, which is why PREFIX_CACHE=0 always looked clean (PR #13).
+  # Correctness first, and it is close to free for MTP as well -- same depth
+  # ladder, only the capture toggled, 8k/16k/32k/50k:
+  #   FULL      87.8 / 86.1 / 70.4 / 63.5 tok/s
+  #   PIECEWISE 93.5 / 83.8 / 70.3 / 59.6 tok/s
+  # so PIECEWISE now covers the whole of CTX=huge, not just dflash2. The old
+  # claim here that forcing it "would cost decode for nothing" was wrong twice.
+  # SPEC=mtp keeps PIECEWISE for CORRECTNESS, not preference. Do not "optimise" this
+  # away: under FULL, mtp at CTX=huge still returns an EMPTY answer at one prompt
+  # length in 128 -- templated length == L (mod 128), L = k+1 = 4 -- with a prefix
+  # cache hit. Measured on current main, fresh server, residues 3/4/5:
+  #   residue 3   794/794    residue 4   0 chars, finish_reason=stop    residue 5   794/794
+  # @mjungnickel18 found it by sweeping all 128 residues (127 clean, one broken, and it
+  # is 4); an earlier version of this comment claimed mtp was "correct under FULL" on
+  # five sampled residues that did not include 4 -- five samples miss a single broken
+  # residue 82% of the time. a75ee4b fixed the same shape for dflash2 but does not
+  # cover this path.
+  #
+  # dflash2 does get FULL, and to the same evidence standard: ALL 128 residues swept
+  # under FULL, self-hit measured, 0 broken -- so this is not the five-sample luck the
+  # mtp claim was. On top of that FULL is 96.5% GSM8K against PIECEWISE's 95.0%, and
+  # worth 2-3x under GPU passthrough (PR #13), where the uncaptured verify is
+  # launch-bound rather than bandwidth-bound. THAT one is a preference and may be
+  # revisited; the mtp line above may not, until the empty answer at residue 4 is gone.
+  [ "$CTX" = "huge" ] && [ "$SPEC" != "dflash2" ] &&
+    CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
 fi
 
 # ASYNC_SCHED=0 (set above for a long DFlash2 verify block) runs the scheduler
@@ -201,6 +331,24 @@ fi
 # tokens to put up for verification. Note --async-scheduling is already the default in
 # 0.27.1: --no-async-scheduling is what turns it off.
 ASYNC_ARGS=$([ "${ASYNC_SCHED:-1}" = 1 ] && echo --async-scheduling || echo --no-async-scheduling)
+
+# Tool / function calling. Without BOTH flags vLLM rejects any request carrying
+# `tools` with tool_choice "auto": 400 '"auto" tool choice requires
+# --enable-auto-tool-choice and --tool-call-parser to be set'. TOOLS=0 turns it off.
+#
+# qwen3_coder is a deliberate choice for this model, not a vLLM default and not a
+# leftover -- do NOT "correct" it to hermes. The parser has to match the format the
+# chat template asks the model for, and Qwen3.8's asks for XML --
+# <tool_call><function=NAME><parameter=K>V</parameter> -- NOT the JSON body that
+# hermes, the usual answer for a Qwen model, reads. Getting that wrong does not
+# error: the call comes back as ordinary content and the client sees no tool_calls,
+# which reads as the model being bad at tools rather than as a misconfigured server.
+# The name is the call format, not the checkpoint -- nothing here is Qwen3-Coder.
+# qwen3_coder, qwen3_xml and mimo are three names for one Qwen3EngineToolParser in
+# 0.27.1, which is the tool-side adapter of the same parser engine that
+# --reasoning-parser qwen3 already uses (vllm/parser/qwen3.py).
+TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
+TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
 
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable: expandable_segments needs CUDA VMM, which WSL2's paravirt
@@ -226,6 +374,7 @@ exec venv/bin/vllm serve "$MODEL" \
   ${ASYNC_ARGS} \
   --max-num-batched-tokens 2048 \
   --speculative-config "$SPEC_CFG" \
-  --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
+  --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
+  ${TOOL_ARGS} \
   ${EXTRA_ARGS}

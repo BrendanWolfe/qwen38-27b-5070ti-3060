@@ -17,7 +17,11 @@ python - "$BASE" <<'EOF'
 import json, os, sys
 d = sys.argv[1].rstrip("/") + "/"
 todo = []
-if not (os.path.exists(d + "config.json") and os.path.exists(d + "model.safetensors.index.json")):
+# tokenizer.json belongs in this list: without it transformers builds an empty
+# vocabulary rather than failing, and the dir stays servable-looking all the way to
+# "ReasoningConfig: failed to tokenize reasoning strings" at startup.
+if not all(os.path.exists(d + f) for f in
+           ("config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json")):
     print("download"); sys.exit()
 idx = json.load(open(d + "model.safetensors.index.json"))["weight_map"]
 if any(not os.path.exists(d + f) for f in set(idx.values())):

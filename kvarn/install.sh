@@ -11,8 +11,13 @@ SP=$("$PY" -c 'import vllm, os; print(os.path.dirname(vllm.__file__))' 2>/dev/nu
 [ -n "$SP" ] && [ -d "$SP" ] || { echo "cannot import vllm with $PY (README: Setup)"; exit 1; }
 cp -r "$HERE/files/vllm/." "$SP/"
 patch -p1 -N -r /dev/null -d "$SP" < "$HERE/kvarn-0.27.1.patch" || true
+# V2-runner port: lets SPEC=dflash2 run with CTX=huge (KVarN KV + prefix caching, 240k).
+# Depends on hunks from both the patches/ set and kvarn-0.27.1.patch, hence applied last.
+patch -p1 -N -r /dev/null -d "$SP" < "$HERE/kvarn-v2-runner.patch" || true
 find "$SP" -type d -name __pycache__ -path "*kvarn*" -prune -exec rm -rf {} + 2>/dev/null || true
-"$PY" - <<'PY'
+"$PY" - "$SP" "$HERE" <<'PY'
+import sys
+from pathlib import Path
 from typing import get_args
 from vllm.config.cache import CacheDType
 assert "kvarn_k4v2_g128" in get_args(CacheDType)
@@ -21,5 +26,37 @@ print("KVarN backend:", AttentionBackendEnum.KVARN.get_class().get_name())
 from vllm.model_executor.layers.quantization.kvarn.config import KVarNConfig
 c = KVarNConfig.from_cache_dtype("kvarn_k4v2_g128", 256)
 print("tile bytes", c.tile_bytes, "-> per token per head", c.tile_bytes_aligned // c.group, "B (fp8: 256 B)")
+
+# Check the result, not the exit code. `patch --forward` cannot tell "already
+# applied" (a legitimate rerun) from "does not apply" (a vLLM tree this patch
+# was not cut against) -- both exit non-zero -- which is why the calls above
+# end in `|| true`. That makes a stale hunk fail SILENTLY: you get a partial
+# port and no warning. Every hunk here adds a port(kvarn-v2) marker, so
+# counting them per file says exactly which ones did not land.
+sp, here = Path(sys.argv[1]), Path(sys.argv[2])
+want, current = {}, None
+for line in (here / "kvarn-v2-runner.patch").read_text().splitlines():
+    if line.startswith("+++ b/"):
+        current = line[len("+++ b/"):].strip()
+        want.setdefault(current, 0)
+    elif current and line.startswith("+") and "port(kvarn-v2)" in line:
+        want[current] += 1
+short = []
+for rel, expected in sorted(want.items()):
+    target = sp / rel
+    found = target.read_text().count("port(kvarn-v2)") if target.is_file() else 0
+    if found < expected:
+        short.append(f"  {rel}: {found}/{expected} markers")
+if short:
+    print("\nERROR: kvarn-v2-runner.patch did not apply completely:", file=sys.stderr)
+    print("\n".join(short), file=sys.stderr)
+    print(
+        "\nThis vLLM tree differs from the one the patch was cut against.\n"
+        "Re-cut the failing hunks before using SPEC=dflash2 CTX=huge -- a\n"
+        "partially applied port runs, but silently drops correctness fixes.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(f"kvarn-v2 runner port complete ({sum(want.values())} markers across {len(want)} files)")
 PY
 echo "kvarn installed"

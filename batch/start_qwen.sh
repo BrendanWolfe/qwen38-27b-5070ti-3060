@@ -71,14 +71,37 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
 fi
 
+# Tool / function calling. Without BOTH flags vLLM rejects any request carrying
+# `tools` with tool_choice "auto": 400 '"auto" tool choice requires
+# --enable-auto-tool-choice and --tool-call-parser to be set'. TOOLS=0 turns it off.
+#
+# qwen3_coder is a deliberate choice for this model, not a vLLM default and not a
+# leftover -- do NOT "correct" it to hermes. The parser has to match the format the
+# chat template asks the model for, and Qwen3.8's asks for XML --
+# <tool_call><function=NAME><parameter=K>V</parameter> -- NOT the JSON body that
+# hermes, the usual answer for a Qwen model, reads. Getting that wrong does not
+# error: the call comes back as ordinary content and the client sees no tool_calls,
+# which reads as the model being bad at tools rather than as a misconfigured server.
+# The name is the call format, not the checkpoint -- nothing here is Qwen3-Coder.
+# qwen3_coder, qwen3_xml and mimo are three names for one Qwen3EngineToolParser in
+# 0.27.1, which is the tool-side adapter of the same parser engine that
+# --reasoning-parser qwen3 already uses (vllm/parser/qwen3.py).
+TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
+TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
+
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable for WSL2 (see single-user/start_qwen.sh).
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # flashinfer's sampling.cu does not build with older system nvcc (12.0);
 # the attention kernels JIT fine. Remove this if you have a recent CUDA toolkit.
 export VLLM_USE_FLASHINFER_SAMPLER=0
-export VLLM_MARLIN_INPUT_DTYPE=$INT8_ACT
-export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
+# "Off" for these is UNSET, not empty. vllm/envs.py registers VLLM_MARLIN_INPUT_DTYPE
+# through env_with_choices(..., None, ["int8", "fp8"]), which rejects "" outright --
+# `ValueError: Invalid value '' ... Valid options: ['int8', 'fp8']` -- so exporting the
+# empty string killed the engine at startup instead of turning the feature off. That is
+# the documented way to disable it (issue #20), so export only when non-empty.
+[ -n "$INT8_ACT" ] && export VLLM_MARLIN_INPUT_DTYPE=$INT8_ACT
+[ -n "$INT8_LAYERS" ] && export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
 
 # API key: put it in api_key.txt in the repo root, or export VLLM_API_KEY.
 if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then
@@ -99,4 +122,5 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-num-batched-tokens 2048 \
   --compilation-config "{\"max_cudagraph_capture_size\":64,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
+  ${TOOL_ARGS} \
   ${EXTRA_ARGS}

@@ -56,7 +56,10 @@ tensors[key.replace(".weight", ".weight_packed")] = pack_to_int32(q, BITS, packe
 tensors[key.replace(".weight", ".weight_scale")] = scale.squeeze(-1).to(torch.bfloat16).contiguous()
 tensors[key.replace(".weight", ".weight_shape")] = torch.tensor([out_f, in_f], dtype=torch.int64)
 
-shutil.copy(d + shard, d + shard + ".bak")
+# ".bak_embed", not ".bak": quant_lm_head.py writes ".bak" for its own shard, and a
+# checkpoint that puts embed_tokens and lm_head in one shard would have the second
+# script overwrite the first one's pristine backup. drafter/train_mtp.py reads both.
+shutil.copy(d + shard, d + shard + ".bak_embed")
 save_file(tensors, d + shard, metadata=meta or {"format": "pt"})
 
 del wm[key]

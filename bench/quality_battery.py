@@ -18,7 +18,12 @@ from concurrent.futures import ThreadPoolExecutor
 import pyarrow.parquet as pq
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(HERE, "..", "api_key.txt")).read().strip()
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(HERE, "..", "api_key.txt"))
 API = os.environ.get("VLLM_API", "http://127.0.0.1:18020/v1")
 # data dir: wikitext-2 test parquet, fineweb-2 dan_Latn test parquet, gsm8k test parquet (see README)
 Q = os.environ.get("QUALITY_DATA", os.path.join(HERE, "quality-data"))

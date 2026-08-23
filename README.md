@@ -142,10 +142,17 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | | [batch/](batch/) | [single-user/](single-user/) |
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
-| aggregate, 64 concurrent (128 in / 512 out) | **~1,094 tok/s** steady-state decode, 942 end-to-end (~1,222 / 1,042 with all layers int8) | n/a (8 slots) |
-| single-stream (C1) decode rate, realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **118** greedy (`CTX=fast`, 64k; 85 / 89 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **122** default, **132** greedy |
+| aggregate, 64 concurrent (128 in / 512 out) | **~1,035 tok/s** steady-state decode, 948 end-to-end (~1,222 / 1,042 with all layers int8) | n/a (8 slots) |
+| single-stream (C1) decode rate, realistic prompts | 46 tok/s | MTP: **121** tok/s at default sampling, **120** greedy (`CTX=fast`, 64k; 96 / 102 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **127** default, **130** greedy |
 | reproducing its own context (quoting a document, applying an edit) | 46 tok/s | **381 tok/s** at 25k context — 15.0 tokens per verify step, drafted straight from the prompt (`SPEC=dflash2` + `DFLASH_TOKENS=15`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) with a verify block the context fills |
+
+<sub>Single-stream numbers re-measured 2026-08-22 on current main with
+`bash bench/run_benchmarks.sh single` — `vllm bench serve`, the 8 prompts in
+`bench/prompts_real.jsonl`, 1024 output tokens, C1, decode rate taken as
+`C / mean TPOT`. Quote them against that harness: a client with a different output
+length is not measuring the same thing, and mixing the two is how
+[#3](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/3) got confusing.</sub>
 
 Both modes share one install — the mode is just which launch script you run.
 Speculation wins below ~8 concurrent users, plain batching above. Numbers are
@@ -165,8 +172,15 @@ the server; the API is OpenAI-compatible on port 18020):
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
-echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env
 docker compose --profile single up -d      # one or a few users; or --profile batch
+```
+
+The server listens on `0.0.0.0` and is unauthenticated unless you give it a key.
+For anything past your own machine, add one first — everything reads it from
+`.env` or `api_key.txt`, and nothing needs it otherwise:
+
+```bash
+echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env
 ```
 
 Or by hand in a venv (same steps: model download, requantization, vLLM
@@ -176,7 +190,7 @@ patches, `verify.sh`) — see [Setup](#setup). Then pick a mode:
 ### If you are the only user, do this
 
 The command above starts the conservative default — MTP speculation, 8 request
-slots, 64k context, 118 tok/s greedy at C1. Three settings are worth more than
+slots, 64k context, 120 tok/s greedy at C1. Three settings are worth more than
 every other knob in this repo put together:
 
 ```bash
@@ -221,6 +235,130 @@ approximating it, and GSM8K reads 96.0-96.5% across the three columns. What
 the whole reason it is opt-in, and why the default stays where it is for anyone
 serving more than a few people. Every other knob: [single-user/](single-user/).
 
+### DFlash2 at 240k: `CTX=huge` (KVarN) also combines with `SPEC=dflash2`
+
+```bash
+bash kvarn/install.sh                # applies kvarn-v2-runner.patch as its second stage
+SPEC=dflash2 CTX=huge PREFIX_CACHE=1 bash single-user/start_qwen.sh
+```
+
+Where `CTX=long` doubles the DFlash2 pool with int8 KV (138k), the KVarN cache
+takes the same idea further: 268k tokens of pool at 245760 max-model-len, on the
+same pinned budget. No kernel work — the KVarN Triton kernels run unmodified on
+the V2 runner; the seven fixes in `kvarn/kvarn-v2-runner.patch` are allocator and
+geometry logic (the patch header walks through them, including an upstream vLLM
+bug in the mamba align resume path, and a NaN path in the DFlash2 candidate
+selector that KVarN noise exposes on verbatim-reproduction content). Two
+machines, both RTX 3090 at 250 W, `bench/labd_bench.py --ctx 20000` — the
+contributor's WSL2 box and this repo's bare-metal one, which do not agree on
+decode rate and do agree on everything else:
+
+| `SPEC=dflash2 CTX=huge PREFIX_CACHE=1` | WSL2 | bare metal |
+|---|---|---|
+| copy (reproduction) | 130 tok/s, 7.8 tok/step | 164 tok/s, 7.83 tok/step |
+| code / edit / quote / summary / qa | 89 / 65 / 44 / 38 / 36 | 109 / 83 / 58 / 51 / 43 |
+| all six tasks together | 53 tok/s, 3.0 tok/step | 67 tok/s, 3.15 tok/step |
+| verbatim reproduction, 25k document | correct | 1,150 / 1,150 chars |
+| KV capacity at 245760 max-model-len | 268,169 tokens | 268,169 tokens |
+| GSM8K exact-match (thinking off) | 97.0% (n=200) | 95.2% (n=600), 95.0% (n=200) |
+| 100k-deep needle, both turns | correct | — |
+| turn 2 over a 100k cached prefix | 4.7 s (vs 169 s cold) | — |
+
+<sub>Context for the GSM8K column: every configuration this repo already ships
+reads 95.0-96.5% on the same 200-question harness ([docs/quality.md](docs/quality.md)),
+and 95.0% is the batch-mode default. 95.2% at n=600 (±0.9 points) therefore sits
+inside the band rather than below it — which is the useful comparison, since this
+mode inherits KVarN's lossy 4/2-bit cache and should be judged against the other
+lossy configurations rather than against bf16. Repeat runs of the reproduction
+check on bare metal are bit-identical (same step count, same 1,150 characters),
+which is the property that was missing before `PIECEWISE` — see below.</sub>
+
+One caveat to the "all of it is lossless" paragraph above: the speculation here
+is still exact, but this mode inherits KVarN's 4/2-bit KV cache, which is lossy —
+the same trade `CTX=huge` already makes (deep-needle retrieval passes at 200k).
+On WSL2, set `VLLM_WSL2_ENABLE_PIN_MEMORY=1` — the V2 runner needs pinned
+memory, and vLLM leaves it off by default there; its UVA buffers work fine on
+the paravirt driver.
+
+One knob this mode sets for you: `cudagraph_mode=PIECEWISE`. Prefix caching and
+a *captured* (FULL) verify step do not currently mix on this path. On WSL2 that
+showed up as acceptance collapsing to about one token per step; on bare metal it
+also **corrupted the output** — special-token ids leaking into the stream, a
+different failure on every run, 1 of 1,176 characters matching the source
+instead of all of them. It is the capture rather than the drafter: eager is
+clean, `LOOKUP=0` is not, forcing a fixed verify-block length is not, and
+PIECEWISE — which keeps the compiled graphs and leaves only the multi-query
+verify uncaptured — restores both the speed and the correctness on both
+machines. So `CTX=huge` runs PIECEWISE and keeps prefix caching, which is worth
+having: turn 2 over a cached 100k document costs 4.7 s against 169 s cold.
+
+`CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches the capture back for anyone hunting
+the root cause. Treat that as unsafe rather than merely slower — the corruption
+above is what it does on bare metal.
+
+Two limits worth knowing before you point this at anything.
+**It is a single-user mode by configuration, and the knob is `MAX_SEQS`.** Fire 8
+concurrent requests at `CTX=huge` and the server runs **two**, with the other six
+queued — because this mode sets `MAX_SEQS=2`. That is a deliberate default for
+long-document sessions, not an engine limit and not a property of the block
+verify, so `MAX_SEQS=8` lifts it: peak 5 concurrent on the same 8-stream test,
+with the KV pool **unchanged at 268,169 tokens** (a recurrent-state slot costs
+~8 MiB, so the slots are close to free; what scales with the pool is the verify
+block length, not the slot count). Raising it grows the captured decode graphs,
+which is why the default stays low rather than because it would cost you context.
+And `DFLASH_TOKENS=15` does not boot at 240k on 24 GB — the pinned-buffer
+arithmetic in [docs/long-context.md](docs/long-context.md) says why — so
+reproduction mode and 240k are mutually exclusive; the default 7 is what runs.
+
+It is a trade rather than a free win: dropping the full decode graphs costs
+short-prompt throughput. Same box, same script, only the capture toggled,
+three runs each:
+
+| | `copy` @25k | de | en | code |
+|---|---|---|---|---|
+| `FULL_AND_PIECEWISE` | 38 tok/s (1.97/step) | 78 | 125 | 202 |
+| PIECEWISE (default here) | **132 tok/s (7.83/step)** | 74 | 102 | 176 |
+
+3.5x on the long shared prefix this mode exists for, 13-18% off short-prompt
+decode. **That 13-18% is short prompts only, and it does not generalise** — past
+8k the two capture modes are within noise of each other on bare metal (111.8 vs
+109.3 tok/s at 8k, 78.2 vs 86.1 at 16k, 68.9 vs 73.3 at 32k, 58.4 vs 56.0 at 50k,
+unique prompts, one server per mode). Under GPU passthrough on a VM the same
+comparison costs 2-3x, reported in [#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13)
+and consistent with the uncaptured verify being launch-bound: launches that are
+nearly free here are not free there.
+
+The capture mode is fixed at boot, so `CTX=huge` takes the trade that matches what
+it is for — **for every speculator, `mtp` included**. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`
+switches back; treat it as unsafe. What it does is corrupt one prompt length in
+every 128, and only for a request that hits the prefix cache: `dflash2` collapses
+to degenerate repetition, `mtp` stops dead and returns an empty answer. The broken residue is
+a function of the draft count (`R = 117 + k`, the same for both speculators),
+which is why scoping this workaround to `dflash2` was wrong — `SPEC=mtp CTX=huge`
+shipped with the same bug, and
+piecewise capture costs it nothing measurable (87.8/86.1/70.4/63.5 tok/s captured
+against 93.5/83.8/70.3/59.6 piecewise over 8k-50k). Gotcha 37 in
+[docs/gotchas.md](docs/gotchas.md) has the residue table and `bench/bugb_sweep.py`
+reproduces it; the hunt for the boundary case is in the PR thread.
+
+### More than one GPU
+
+Everything here is written for one 24 GB card, and that is the only configuration
+measured in this README. It is not the only one that works: `--tensor-parallel-size`
+goes through untouched, via `EXTRA_ARGS`.
+
+```bash
+EXTRA_ARGS="--tensor-parallel-size 2" bash single-user/start_qwen.sh
+```
+
+Reported working on **2x RTX 5060 Ti 16 GB** by
+[@antonybudianto](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/22) — two cards
+that could not hold this model individually. I have one 3090, so every multi-GPU
+number in the issues is a user report rather than something I have reproduced, and
+the tuning here (the pinned `KV_MEM`, the graph budget, `MAX_SEQS`) is sized for a
+single card and is probably not right for yours. If you run it on two, numbers in
+[#7](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/7) are welcome.
+
 ## Benchmarks
 
 Full tables per mode in [batch/README.md](batch/README.md) and
@@ -230,26 +368,36 @@ Full tables per mode in [batch/README.md](batch/README.md) and
 
 ### vs. ninfer-3090
 
-[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort benchmarks
-for this model on this card, using C concurrent requests of random tokens. Random
-tokens are a bad yardstick for speculative decoding — acceptance swings between 80%
-and near zero with the sample — so ours are 8 realistic chat prompts (English,
-Danish, code), 1,024-token answers, model-default sampling:
+[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) is a standalone C++/CUDA engine
+that publishes cohort benchmarks for this model on this card. Theirs are 1,024-token
+answers from 29-34-token prompts, greedy, MTP3, int8 KV, prefix reuse off, an
+8,192-token context window, and **thinking on** at `reasoning_effort=medium`, so their
+1,024 tokens include reasoning. Ours are 8 realistic chat prompts (English, Danish,
+code), 1,024-token answers, model-default sampling, thinking off:
 
-| Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch | single-user, MTP | single-user, DFlash2 |
+| Cohort | ninfer-3090 (MTP3) | this repo, batch | single-user, MTP | single-user, DFlash2 |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 | 113.6 | **122.1** |
-| C2 | 89.43 tok/s | 82.6 | **194.0** | 191.4 |
-| C4 | 97.89 tok/s | 165.6 | 258.6 (289.2 with `CTX=long`) | **286.7** |
-| C8 | 161.28 tok/s | 298.5 | **379.9** (409.0 with `CTX=long`) | 373.7 |
-| C64 (128 in / 512 out) | not supported | **~1,094** | — | — |
+| C1 | 71.00 tok/s | 45.5 | 111.1 | **121.8** |
+| C2 | 90.66 tok/s | 86.3 | 191.8 | **195.5** |
+| C4 | 100.28 tok/s | 168.3 | 268.5 | **278.9** |
+| C8 | 165.33 tok/s | 324.9 | **407.3** | 389.9 |
+| C64 (128 in / 512 out) | not supported | **~1,035** | — | — |
 
-Decode rate (C × 1000 / mean TPOT), best of the runs we have, from
-`bench/run_benchmarks.sh`; greedy instead of default sampling reads
-131.9 / 209.6 / 309.6 / 390.6 for DFlash2. The C64 and DFlash2 columns are from the
-current stack, the other two from earlier runs; ninfer's published figures are their
-own protocol. Peak VRAM is comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is
-mostly vLLM's continuous batching plus the memory this repo's requantization frees up.
+Decode rate, C × 1000 / mean TPOT. All four of our columns were re-measured together
+on the current stack with `bench/run_benchmarks.sh`, keeping the second run after each
+restart as the script advises; greedy instead of default sampling reads
+131.2 / 214.6 / 285.7 / 405.5 for DFlash2. Run-to-run spread on the same server is
+5-8%, so treat one-decimal differences between the three right-hand columns as noise —
+C1 and C8 are where the modes genuinely separate.
+
+Theirs is the **decode** column of their table; their end-to-end column reads
+70.19 / 89.43 / 97.89 / 161.28, and an earlier version of this table quoted *those*
+against our decode rate, which was not like-for-like. What still is not like-for-like,
+in their favour and ours: their C1 is a single prompt in a single run with no error
+bars, thinking is on for them and off for us, and they publish no power limit or driver
+version — ours is an RTX 3090 pinned at 250 W. Peak VRAM is comparable (23.0 vs
+22.1 GiB at C8). The gap is mostly vLLM's continuous batching plus the memory this
+repo's requantization frees up.
 
 ### Quality
 
@@ -302,8 +450,8 @@ greedy):
 (Steps 4-6 are the same 8-prompt protocol; greedy is deterministic for a
 given server and request order but differs between configs and even with
 prefix-cache hits, so single runs carry ±3-5% on tokens/step —
-`bench/run_benchmarks.sh single` reproduces 113.6 / 118.3 tok/s decode at C1,
-the best repeats read 115 / 124.)
+`bench/run_benchmarks.sh single` reproduces 111.1 / 120.0 tok/s decode at C1,
+the best repeats read 119 / 124.)
 Going deeper (k=5) loses again: 106 / 105. k=4 is the knee, but on vLLM
 0.27.1's FlashInfer backend (needed for fp8 KV, i.e. for 150k context) four
 drafts crash the engine with an illegal memory access as soon as one request
@@ -357,7 +505,7 @@ done
 # optional: the KVarN 4/2-bit KV cache for 262k context (docs/long-context.md)
 bash kvarn/install.sh
 
-# api key
+# api key — optional, but the server binds 0.0.0.0 and is open without one
 openssl rand -hex 24 > api_key.txt
 ```
 
@@ -374,7 +522,7 @@ JIT). Test it:
 
 ```bash
 curl http://localhost:18020/v1/chat/completions \
-  -H "Authorization: Bearer $(cat api_key.txt)" \
+  -H "Authorization: Bearer $(cat api_key.txt 2>/dev/null)" \
   -H "Content-Type: application/json" \
   -d '{"model": "qwen3.8-27b",
        "messages": [{"role": "user", "content": "hej"}],
@@ -383,6 +531,12 @@ curl http://localhost:18020/v1/chat/completions \
 
 Qwen recommends temperature 0.7 / top_p 0.8 for instruct mode, and 1.0 / 0.95
 with thinking enabled (the default).
+
+Tool calling works over the same endpoint — send `tools` with `tool_choice:
+"auto"` and the reply carries `tool_calls`. Both launchers set
+`--enable-auto-tool-choice --tool-call-parser qwen3_coder`; the parser has to
+read Qwen's XML call format, which is what this model's chat template emits —
+not the JSON that `hermes` reads. `TOOLS=0` turns it off.
 
 To check the numbers on your own card: `bash verify.sh` (also probes the live
 server and prints which attention backend and KV pool it came up with), then
