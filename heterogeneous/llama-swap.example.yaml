@@ -7,10 +7,11 @@
 # networks. The unprefixed IDs can be kept as aliases for older clients.
 #
 # models:
-  "vllm-speed/qwen3.8-27b":
-    name: "Qwen3.8 27B (vLLM, RTX 5070 Ti + RTX 3060)"
+  "vllm-speed/qwen3.8-27b-batch":
+    name: "Qwen3.8 27B batch (vLLM, RTX 5070 Ti + RTX 3060)"
     description: "General 147k FP8-KV/MTP batch profile (8 slots); frozen launcher snapshot."
     aliases:
+      - "vllm-speed/qwen3.8-27b"
       - "qwen3.8-27b"
       - "qwen-local"
     useModelName: "qwen3.8-27b"

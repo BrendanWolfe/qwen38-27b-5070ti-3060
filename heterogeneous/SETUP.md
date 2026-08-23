@@ -174,7 +174,8 @@ Install llama-swap, then merge the three model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
-- `vllm-speed/qwen3.8-27b` — general 147k MTP (`start_qwen_batch.sh`)
+- `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`);
+  keeps `vllm-speed/qwen3.8-27b` as an alias so existing clients keep working
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 

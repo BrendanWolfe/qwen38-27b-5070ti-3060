@@ -539,7 +539,8 @@ float32/float16/bfloat16, so that floor cannot be lowered.
 `heterogeneous/llama-swap.example.yaml` holds the two model entries (also
 what runs on the origin host):
 
-- `vllm-speed/qwen3.8-27b` — general 147k MTP (`start_qwen_batch.sh`)
+- `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`),
+  aliased from `vllm-speed/qwen3.8-27b`
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — experimental 32k DFlash2
   (`start_qwen_dflash2.sh`)
