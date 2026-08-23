@@ -32,3 +32,15 @@
     checkEndpoint: /health
     ttl: 900
     unloadTimeout: 60
+  "vllm-speed/qwen3.8-27b-solo":
+    name: "Qwen3.8 27B 262k solo (single stream, full native context)"
+    description: "KVarN 4-bit-key/2-bit-value KV at ONE scheduler slot: 296,974-token pool at the full 262,144 context, at the batch profile's decode rate. Serves one request at a time."
+    aliases:
+      - "qwen3.8-27b-solo"
+    useModelName: "qwen3.8-27b"
+    cmd: |
+      /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
+      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_solo.sh
+    checkEndpoint: /health
+    ttl: 900
+    unloadTimeout: 60

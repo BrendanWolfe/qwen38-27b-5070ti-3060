@@ -64,4 +64,37 @@ export SPEC=${SPEC:-mtp}
 export DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 export MAX_SEQS=${MAX_SEQS:-1}
 
-exec "$DIR/start_qwen.sh"
+# RETRY, because 262,144 is above the worst startup-profiling draw (gotcha 38).
+# This profile asks for more context than the high-activation branch can size a
+# pool for, so a launch that draws it dies in ~20 s with "estimated maximum
+# model length is 143360" instead of serving. The branch is redrawn on every
+# launch, so the fix is to launch again: observed 8 clean boots, then a refusal,
+# then clean boots again.
+#
+# The alternative was to drop MAX_LEN to the worst draw, which is 143,360 --
+# that would throw away the entire point of the profile to avoid a retry that
+# costs 20 seconds. A failed attempt dies at KV sizing, before graph capture,
+# and a successful boot is ~27 s with a warm compile cache, so four attempts fit
+# inside llama-swap's healthCheckTimeout (180 s by default; raise it if you have
+# a cold torch.compile cache).
+#
+# Only this refusal is retried. Any other exit -- a real OOM, a bad flag, or the
+# SIGTERM llama-swap sends to unload the model -- propagates on the first try.
+ATTEMPTS=${SOLO_BOOT_ATTEMPTS:-4}
+LOG="$(mktemp -t qwen-solo-boot.XXXXXX)"
+trap 'rm -f "$LOG"' EXIT
+trap 'exit 143' TERM INT
+
+for n in $(seq 1 "$ATTEMPTS"); do
+  : > "$LOG"
+  set +e
+  "$DIR/start_qwen.sh" 2>&1 | tee "$LOG"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -ne 0 ] && grep -q 'estimated maximum model length' "$LOG" \
+     && [ "$n" -lt "$ATTEMPTS" ]; then
+    echo "start_qwen_solo: startup profiling drew the high-activation branch (attempt $n/$ATTEMPTS); relaunching to redraw it. See gotcha 38." >&2
+    continue
+  fi
+  exit "$rc"
+done

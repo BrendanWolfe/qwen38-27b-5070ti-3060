@@ -141,7 +141,7 @@ Honest tradeoffs versus the GGUF setup:
   vLLM flags for accurate per-request metrics and Qwen tool calling.
 - **llama-swap** — the two model entries in
   `heterogeneous/llama-swap.example.yaml`:
-  `vllm-speed/qwen3.8-27b` (batch) and `vllm-speed/qwen3.8-27b-dflash2`
+  `vllm-speed/qwen3.8-27b` (batch), `vllm-speed/qwen3.8-27b-solo` (262k) and `vllm-speed/qwen3.8-27b-dflash2`
   (unprefixed IDs kept as aliases).
 - **Docker** — a `hetero` compose profile (two-GPU reservation) and a `hetero`
   entrypoint command.

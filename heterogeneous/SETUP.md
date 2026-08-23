@@ -170,15 +170,17 @@ SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
 
 ## 8. (Optional) llama-swap front door
 
-Install llama-swap, then merge the two model entries from
+Install llama-swap, then merge the three model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
 - `vllm-speed/qwen3.8-27b` — general 147k MTP (`start_qwen_batch.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
+- `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 
-`start_qwen_solo.sh` and `start_qwen_huge.sh` are not wired into llama-swap by
-default; add them the same way if you want them swappable.
+`start_qwen_huge.sh` is not wired in by default; add it the same way if you want
+the 4-slot 262k profile swappable too. If you rename a launcher, remember that
+llama-swap holds absolute paths — grep your live config, not just this repo.
 
 Notes that matter:
 
