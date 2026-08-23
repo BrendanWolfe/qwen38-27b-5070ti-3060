@@ -10,7 +10,7 @@ Five setups are supported:
 
 | profile | launcher | speculation | KV | context | measured decode |
 |---|---|---|---|---|---|
-| batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 140k (155,978-token pool) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
+| batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 147k (147,456-token pool floor) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
 | solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
 | short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
 | huge context | `start_qwen_huge.sh` | MTP-3, int4 per-token-head KV | int4 | **262k** (284,234-token pool) | batch only — ~112 tok/s prefill at depth |
@@ -288,9 +288,14 @@ rank* is.
 
 | change | ms/step | tok/step | KV pool | verdict |
 |---|---:|---:|---:|---|
-| batch 140k, as shipped | 35.2 | 2.54-2.58 | 146,847 | baseline |
-| + PR #52297 (GDN metadata hoist) | 35.1 | 2.54-2.58 | **155,978** | no speed change; +6.2% pool |
+| batch, as shipped | 35.2 | 2.54-2.58 | see below | baseline |
+| + PR #52297 (GDN metadata hoist) | 35.1 | 2.54-2.58 | not measurable | no speed change |
 | + reversed pipeline, 32k | **32.4** | 2.51-2.62 | 33,363 | -7.7% step time, -78% pool |
+
+The KV pool column is deliberately empty for the first two rows. The pool from
+an unchanged command varies by up to 38,805 tokens between launches (gotcha
+38), which is larger than any effect either change could have had, so a
+one-run-each comparison of pools measures the lottery and nothing else.
 
 **PR #52297 does not speed this machine up.** Upstream measured +61% output
 tok/s at concurrency 1 on Qwen3.6-35B-A3B + DFlash on an H200, from cutting
@@ -300,12 +305,17 @@ longer here, on a 9800X3D that is not the bottleneck, with async scheduling
 already hiding part of it. Measured: 35.2 -> 35.1 ms/step, 0.3%, with
 byte-identical tokens per step.
 
-It is still worth keeping, for a reason nobody predicted: hoisting the
-per-group tensors out of `build()` lowers the profiled peak activation, so the
-KV pool grows from 146,847 to **155,978 tokens** — 9,131 tokens of extra
-context for free. `patches/vllm-pr52297-gdn-common-metadata.patch` documents
-the backport; the hoisted helper is verified against the 0.27.1 inline code
-over 4,002 random batches.
+It is still worth keeping — a CPU-side saving that costs nothing is worth
+having, and the hoisted helper is verified against the 0.27.1 inline code over
+4,002 random batches. `patches/vllm-pr52297-gdn-common-metadata.patch`
+documents the backport.
+
+This file previously claimed the patch also bought 9,131 tokens of pool
+(146,847 -> 155,978) by lowering the profiled peak activation. That is
+withdrawn. Both numbers are ordinary draws from the startup-profiling lottery
+in gotcha 38, which spans 146,086 to 188,769 tokens on this profile with no
+code change at all. The patch may or may not help the pool; one run each
+cannot tell, and nothing here has measured it properly.
 
 **Reversing the pipeline is worth 7.7%.** `GPU_IDS=1,0 PP_LAYERS=20,44` gives
 each card the same number of target layers as before — and therefore the same
@@ -379,7 +389,8 @@ does not matter; it costs nothing at low load.
 ### 262k, the full native context
 
 `--kv-cache-dtype int4_per_token_head --attention-backend TRITON_ATTN` holds a
-**284,234-token pool** at `MAX_LEN=262144`, against FP8's 155,978. The binding
+**284,234-token pool** at `MAX_LEN=262144`, which FP8 cannot reach at any
+`MAX_LEN` (it refuses above ~148k). The binding
 rank is the 5070 Ti with 11 of the 16 full-attention layers; int4 per-token-head
 is about half FP8's 2 KB per token per layer, which is the whole trick. MTP,
 pipeline parallelism, the V2 model runner and the Triton backend all start
@@ -497,11 +508,11 @@ density — 4 KB per token per layer means a 34,539-token pool against FP8's
 against BF16's 1.05x, which is the only reason left to choose it.
 `start_qwen_dflash2_fast.sh` therefore ships **BF16 at 24/40**.
 
-**None of this transfers to the batch 140k MTP profile.** The same piecewise
+**None of this transfers to the batch FP8 MTP profile.** The same piecewise
 downgrade fires there — it is FP8/FlashInfer too — but switching it to int8pth
 is a net loss, measured same-session at 44/20, `MAX_LEN=140000`:
 
-| batch profile, 140k | ms/step | tok/step | e2e tok/s | pool |
+| batch profile, FP8 | ms/step | tok/step | e2e tok/s | pool |
 |---|---|---|---|---|
 | FP8 (as shipped) | 35.0 | 2.56–2.61 | 74.7–75.9 | **184,130** |
 | int8pth | 34.5 | 2.50–2.63 | 74.1–77.8 | 145,240 |
@@ -528,7 +539,7 @@ float32/float16/bfloat16, so that floor cannot be lowered.
 `heterogeneous/llama-swap.example.yaml` holds the two model entries (also
 what runs on the origin host):
 
-- `vllm-speed/qwen3.8-27b` — general 140k MTP (`start_qwen_batch.sh`)
+- `vllm-speed/qwen3.8-27b` — general 147k MTP (`start_qwen_batch.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — experimental 32k DFlash2
   (`start_qwen_dflash2.sh`)
 
@@ -571,7 +582,7 @@ docker compose logs -f hetero
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
 | `DFLASH_KV_MEMORY` | `2500000000` | manual per-rank KV bytes for the DFlash2 profile |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `140000` / `32768` / `262144` | API context limit (batch / short / solo and huge wrappers) |
+| `MAX_LEN` | `147456` / `32768` / `262144` | API context limit (batch / short / solo and huge wrappers). Raising it is not free: see gotcha 38, the shipped values are the worst-draw ceilings |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
 | `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
@@ -609,7 +620,7 @@ PREFIX_CACHE=0 bash heterogeneous/start_qwen.sh
   quantized LM head. MTP+PP is a backport of upstream PR #46994.
 - The V2 runner does not support the `thinking_token_budget` request field;
   normal thinking controls and `chat_template_kwargs.enable_thinking` work.
-- A full 140k request nearly fills the batch cache, so only one such request
+- A full 147k request nearly fills the batch cache, so only one such request
   can be resident. Several shorter requests can run concurrently.
 - Pipeline parallelism still includes the slower 3060 in every model step and
   cannot behave like one unified 28 GiB GPU. At concurrency 1 it does not even

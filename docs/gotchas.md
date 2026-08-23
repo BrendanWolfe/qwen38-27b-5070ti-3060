@@ -341,3 +341,43 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     instead of length; `bench/labd_bench.py` sends two warm-ups on `doc[:4000]`,
     which arms the trigger for everything after it. `bench/bugb_sweep.py` prints
     the `mod 128` column for this.
+
+38. **The startup memory profile is a per-rank lottery, so the KV pool from an
+    unchanged command is not reproducible — and neither is whether the server
+    starts at all.** Each pipeline rank independently lands on a low (~0.32 GiB)
+    or high (~1.2 GiB) profiled activation peak, and the pool follows. Eight
+    launches of the batch profile, identical command, GPUs verified idle before
+    each:
+
+    | PP0 peak | PP1 peak | pool |
+    |---|---|---|
+    | 1.19 | 1.24 | 146,086 |
+    | 0.32 | 1.24 | 157,500 / 158,838 |
+    | 0.32 | 0.32 | 184,891 / 186,462 |
+
+    A 38,805-token spread. The same lottery decides the refusal threshold: at
+    `MAX_LEN=180224` one launch died with "estimated maximum model length is
+    159744" and the next two booted with a 188,769-token pool. Observed
+    estimates are 148,096, 159,744 and ~189,000 — at least three states, not
+    two.
+
+    Consequences, all of which this repo got wrong at least once:
+
+    - **Ship the worst draw, not the best.** A `MAX_LEN` between the worst and
+      best threshold starts most of the time and then, one restart later, does
+      not. `start_qwen_batch.sh` ships 147,456 because 148,096 is the worst
+      estimate seen across ~20 boots.
+    - **Never attribute a pool change to a code change from one run each.** This
+      file used to credit PR #52297 with growing the pool from 146,847 to
+      155,978 tokens by lowering the profiled peak. Both numbers are ordinary
+      draws from the range above; the patch is a CPU-side metadata hoist and its
+      pool effect is unmeasured. It is still worth keeping, just not for that.
+    - **Repeated agreement is not determinism.** Three consecutive launches at
+      one setting returning bit-identical pools was read here as proof the
+      effect was deterministic and driven by `MAX_LEN`. It is three draws that
+      landed on the same branch; a fourth at a nearby setting drew differently.
+      Vary the thing you are testing *and* repeat it, or you learn nothing.
+
+    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not the cause —
+    clearing it gave three low draws in a row and then a high one. Do not clear
+    it hoping to pin the branch; gotcha 3 still applies.

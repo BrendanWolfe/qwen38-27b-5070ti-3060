@@ -14,7 +14,7 @@ two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
 | profile | launcher | KV | context | measured decode |
 |---|---|---|---|---|
-| **batch / general** | `heterogeneous/start_qwen_batch.sh` | FP8 | 140k (155,978-token pool) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
+| **batch / general** | `heterogeneous/start_qwen_batch.sh` | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
 | **solo / long** | `heterogeneous/start_qwen_solo.sh` | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, one stream only |
 | **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **83.4–86.0 tok/s** (77–159 t/s by workload) |
 | **fastest DFlash2** | `heterogeneous/start_qwen_dflash2_fast.sh` | BF16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
@@ -55,9 +55,9 @@ reasons, not luck:
   metrics, and working Qwen tool calling (12/12 API smoke suite).
 
 The context win is just as large: with Q5 weights the pair has only ~9.5 GB
-left for KV (roughly 20–40k tokens), while this fork's FP8 pool holds
-**155,978 tokens**, and the int4 profile reaches Qwen3.8's full native
-**262,144** — 131k+ context is only possible on the vLLM path.
+left for KV (roughly 20–40k tokens), while this fork's FP8 pool holds at
+least **147,456 tokens**, and the KVarN and int4 profiles reach Qwen3.8's full
+native **262,144** — 131k+ context is only possible on the vLLM path.
 
 Honest tradeoffs versus the GGUF setup:
 
@@ -70,7 +70,7 @@ Honest tradeoffs versus the GGUF setup:
 - **Known workaround.** The DFlash2 drafter runs eagerly
   (`VLLM_DFLASH_CUDAGRAPH=0`) because its shared quantized LM-head GEMM crashes
   inside DFlash's private CUDA graph — some speed is left on the table.
-- **Throughput shape.** The 3060 bounds every step and a full 140k request
+- **Throughput shape.** The 3060 bounds every step and a full 147k request
   occupies the cache alone. A single stream pays both pipeline stages in
   series, so concurrency is where this pair is strong rather than weak:
   eight streams total 301 tok/s, 4.12x one stream, for 77% more per-token

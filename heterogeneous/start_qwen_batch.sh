@@ -1,6 +1,6 @@
 #!/bin/bash
 # General-purpose CONCURRENT profile for an RTX 5070 Ti (16 GiB) + RTX 3060
-# (12 GiB): FP8 KV, MTP-3, eight scheduler slots, 140k of context. This is the
+# (12 GiB): FP8 KV, MTP-3, eight scheduler slots, 147k of context. This is the
 # profile llama-swap runs, and it is a full standalone copy of start_qwen.sh
 # rather than a wrapper, so later experiments in the shared launcher cannot
 # change what the served model does. Use start_qwen_solo.sh instead when one
@@ -23,21 +23,30 @@ MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound}
 PORT=${PORT:-18020}
 GPU_IDS=${GPU_IDS:-0,1}
 PP_LAYERS=${PP_LAYERS:-44,20}
-MAX_LEN=${MAX_LEN:-140000}
+MAX_LEN=${MAX_LEN:-147456}
 # Eight scheduler slots, not four. Decode on this pair is bound by weight
 # bandwidth, so extra sequences ride along in the same step nearly for free:
 # 4 -> 8 slots is +41% aggregate throughput at eight concurrent streams
 # (213.9 -> 301.0 tok/s) and changes nothing at one to four (73.0/115.7/213.9
 # against the four-slot 73.1/120.8/212.7). The only cost is CUDA graph memory,
-# 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the ~1 GiB pool swing between
-# identical starts is rank 1's profiled activation peak (0.32 or 1.24 GiB) and
-# is unrelated to this. Past eight the curve flattens but latency does not:
+# 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the much larger pool swing
+# between identical starts is the startup-profiling lottery (gotcha 38), not
+# this. Past eight the curve flattens but latency does not:
 # C12 is +13% for 82 ms ITL, C16 is +28% for a ~3 s TTFT. See
 # heterogeneous/README.md.
 MAX_SEQS=${MAX_SEQS:-8}
 # Leave enough unprofiled memory for compiled prefill workspaces. At 0.93 a
 # 5k-token harness request could need another 56 MiB, OOM a PP worker, and
 # strand its peers. 0.91 still supports the required 131k context.
+#
+# MAX_LEN is 147,456 rather than 140,000 because 147,456 is the most this
+# profile can ask for and still start on its WORST startup-profiling draw.
+# Startup profiling lands each pipeline rank independently on a low (0.32 GiB)
+# or high (~1.2 GiB) activation peak, so the pool from an unchanged command
+# ranges over 146,086 / 157,500 / 184,891 tokens, and the refusal threshold
+# over 148,096 / 159,744 / ~189,000. Only the worst draw is safe to ship: at
+# 155,648 this profile refuses to start perhaps half the time. See gotcha 38 --
+# do NOT raise this on the strength of one lucky boot.
 GPU_UTIL=${GPU_UTIL:-0.91}
 API_SERVERS=${API_SERVERS:-1}
 KV=${KV:-fp8}

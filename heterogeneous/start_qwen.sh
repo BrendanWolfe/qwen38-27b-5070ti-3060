@@ -79,7 +79,7 @@ elif [ "$KV" = "kvarn" ]; then
   #
   #   KV=kvarn  32k  MAX_SEQS=1   171,239-token pool   74.6 tok/s, 35.2 ms/step
   #   KV=kvarn  32k  MAX_SEQS=8    78,220-token pool
-  #   KV=fp8   140k  MAX_SEQS=8   155,978-token pool   73.6-75.5 tok/s (batch)
+  #   KV=fp8   147k  MAX_SEQS=8   147,456-token floor  73.6-75.5 tok/s (batch)
   #   KV=int4pth 262k MAX_SEQS=4  284,234-token pool   (start_qwen_huge.sh)
   #
   # So at one slot KVarN beats the batch profile's pool at matching decode, and

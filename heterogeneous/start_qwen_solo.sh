@@ -9,41 +9,49 @@
 #
 #   profile              KV       slots  ctx    pool      decode
 #   start_qwen_solo.sh   KVarN      1    262k   296,974   72.4-73.6 tok/s, 34.8-35.4 ms/step
-#   start_qwen_batch.sh  fp8        8    140k   155,978   73.6-75.5 tok/s
+#   start_qwen_batch.sh  fp8        8    147k   147,456+  73.6-75.5 tok/s
 #   start_qwen_huge.sh   int4pth    4    262k   284,234   batch only (~112 tok/s prefill at depth)
 #
-# Against batch that is 90% more pool and 122k more context at the same decode
-# rate and the same tokens/step (2.48-2.52 against 2.51-2.62) -- for ONE stream.
+# Against batch that is roughly twice the pool and 115k more context at the same
+# decode rate and the same tokens/step (2.48-2.52 against 2.51-2.62) -- for ONE
+# stream. FP8 cannot reach this context at any MAX_LEN; it refuses above ~148k.
 # It also holds a larger pool than start_qwen_huge.sh at the same 262,144
 # context (296,974 against 284,234), so if you want the native context on a
 # single stream this is the better of the two; huge keeps 4 slots.
 #
 # WHY THE FULL 262,144, AND WHY THAT IS NOT OBVIOUS. The pool is memory divided
 # by bytes-per-token; MAX_LEN only caps the longest single request. What is NOT
-# obvious is that the two are coupled through the memory PROFILE, and the
-# coupling is NON-MONOTONIC. Measured, GPUs verified idle before each run:
+# obvious is that the two are coupled through the startup memory PROFILE, and
+# that the profile is not reproducible. vLLM profiles each pipeline rank
+# independently, and each rank lands on a low (~0.3 GiB) or high (~1.2 GiB)
+# activation peak; the pool follows, and so does whether the server starts at
+# all. On the eight-slot batch profile an unchanged command has returned pools
+# of 146,086 / 157,500 / 184,891 tokens and refusal thresholds of 148,096 /
+# 159,744 / ~189,000. That is gotcha 38, and it is the thing to know before
+# touching MAX_LEN anywhere in this repo.
 #
-#   MAX_LEN    rank1 peak_act   result
-#   143,360        1.22 GiB     boots, 220,943-token pool
-#   200,704        1.22 GiB     REFUSES to start (estimates 182,272)
-#   245,760        1.22 GiB     REFUSES to start (estimates 149,504)
-#   262,144        0.30 GiB     boots, 296,974-token pool
+# This profile appears to sit on the low branch. Measured at 262,144, GPUs
+# verified idle before each run: EIGHT consecutive boots, all peak_act 0.3/0.3,
+# all 296,974 tokens, no failures. Single runs at three shorter MAX_LEN values
+# each drew the high branch instead:
 #
-# So the model's native 262,144 is both the longest context AND the largest pool,
-# while two shorter settings between do not boot at all. profile_run() calls
-# _dummy_sampler_run() on the LAST pipeline rank only -- the 3060 -- and that
-# dummy sampler allocation is what moves, 1.22 GiB against 0.30. Every other
-# input is byte-identical across these runs: same max_num_batched_tokens (2048),
-# same cudagraph capture sizes, same 2048-token attention block, same 1.45%
-# mamba padding, same startup free memory. WHY max_model_len changes that
-# allocation is NOT explained here -- only that it does, deterministically.
+#   MAX_LEN    rank peaks    result
+#   143,360    1.22 / -      boots, 220,943-token pool
+#   200,704    1.22 / -      refuses to start (estimates 182,272)
+#   245,760    1.22 / -      refuses to start (estimates 149,504)
+#   262,144    0.30 / 0.30   boots, 296,974-token pool  (x8)
 #
-# Deterministic is the other half of it: three consecutive runs at 262,144 from
-# verified-idle GPUs returned bit-identical numbers (296,974 tokens, peak_act
-# 0.30/0.30). Earlier notes in this repo called this a run-to-run swing; it is
-# not. Comparing runs that differed in MAX_LEN made a deterministic effect look
-# like noise. If you change MAX_LEN here, re-measure rather than interpolate --
-# a value between 143,360 and 262,144 may simply refuse to start.
+# Read that table carefully: n=1 per shorter row against n=8 here. It is enough
+# to justify shipping 262,144 -- it is simultaneously the longest context, the
+# largest pool, and the only setting with repeat evidence behind it -- and it is
+# NOT enough to conclude that 200,704 always fails or that MAX_LEN causes the
+# branch. Those three rows may simply be unlucky draws.
+#
+# An earlier version of this comment claimed the effect was deterministic and
+# driven by MAX_LEN, on the strength of three identical runs at 262,144. Three
+# agreeing runs are three draws from the same branch, not a proof; the batch
+# profile draws differently from an identical command. If you change MAX_LEN
+# here, re-measure SEVERAL times rather than interpolating from one boot.
 #
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

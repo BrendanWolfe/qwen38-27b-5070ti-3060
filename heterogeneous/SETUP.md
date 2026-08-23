@@ -5,7 +5,7 @@ Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
-| `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 140k (155,978-token pool) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
+| `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 147k (147,456-token pool floor) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
 | `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
 | `start_qwen_dflash2.sh` | short-context DFlash2 | 32k (33,506-token pool) | BF16 | **~92 tok/s** avg (77–159 t/s by workload) |
 | `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
@@ -124,7 +124,7 @@ llama-swap (step 8) runs with `NO_API_KEY=1` and needs no key.
 
 ## 7. Run
 
-### Batch MTP profile (general purpose, 140k context)
+### Batch MTP profile (general purpose, 147k context)
 
 ```bash
 bash heterogeneous/start_qwen_batch.sh
@@ -143,8 +143,8 @@ bash heterogeneous/start_qwen_batch.sh
   ```
 - Expected: **74–75 tok/s** single-stream on realistic prompts (an earlier
   repeated-512-token measurement read 84; both are in
-  [README.md](README.md)), ~155,978-token
-  FP8 KV pool. Keep it in a `tmux` session or a systemd unit for long runs.
+  [README.md](README.md)), and an FP8 KV pool of at least 147,456 tokens —
+  often more, because the startup profile is a lottery (gotcha 38). Keep it in a `tmux` session or a systemd unit for long runs.
 
 ### DFlash2 profile (short context, fastest decode)
 
@@ -174,7 +174,7 @@ Install llama-swap, then merge the two model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
-- `vllm-speed/qwen3.8-27b` — general 140k MTP (`start_qwen_batch.sh`)
+- `vllm-speed/qwen3.8-27b` — general 147k MTP (`start_qwen_batch.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2 profile
 
 `start_qwen_solo.sh` and `start_qwen_huge.sh` are not wired into llama-swap by

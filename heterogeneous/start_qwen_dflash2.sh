@@ -1,5 +1,5 @@
 #!/bin/bash
-# Experimental 32k DFlash2 profile. This is separate from the frozen 140k MTP
+# Experimental 32k DFlash2 profile. This is separate from the frozen 147k MTP
 # launcher because DFlash2 needs BF16 KV and additional PP auxiliary-state relay.
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

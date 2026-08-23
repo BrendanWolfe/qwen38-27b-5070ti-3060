@@ -9,7 +9,7 @@
 # models:
   "vllm-speed/qwen3.8-27b":
     name: "Qwen3.8 27B (vLLM, RTX 5070 Ti + RTX 3060)"
-    description: "General 140k FP8-KV/MTP batch profile (8 slots); frozen launcher snapshot."
+    description: "General 147k FP8-KV/MTP batch profile (8 slots); frozen launcher snapshot."
     aliases:
       - "qwen3.8-27b"
       - "qwen-local"
