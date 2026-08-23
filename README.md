@@ -16,7 +16,7 @@ two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 |---|---|---|---|---|
 | **batch / general** | `heterogeneous/start_qwen_batch.sh` | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
 | **solo / long** | `heterogeneous/start_qwen_solo.sh` | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, one stream only |
-| **short-context** | `heterogeneous/start_qwen_dflash2.sh` | BF16 | 32k (33,506-token pool) | **83.4–86.0 tok/s** (77–159 t/s by workload) |
+| **DFlash2 / long** | `heterogeneous/start_qwen_dflash2.sh` | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
 | **fastest DFlash2** | `heterogeneous/start_qwen_dflash2_fast.sh` | BF16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 | **huge context** | `heterogeneous/start_qwen_huge.sh` | int4 | **262k** (284,234-token pool) | batch only — prefill falls to ~112 tok/s at depth |
 

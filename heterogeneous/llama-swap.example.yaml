@@ -23,7 +23,7 @@
     unloadTimeout: 60
   "vllm-speed/qwen3.8-27b-dflash2":
     name: "Qwen3.8 27B 32k (experimental DFlash2 profile)"
-    description: "Experimental BF16-KV/DFlash2 profile with PP auxiliary-state relay; needs prepare/fetch_dflash2.py first."
+    description: "Experimental FP8-KV/DFlash2 profile, 88k context, PP auxiliary-state relay; needs prepare/fetch_dflash2.py first."
     aliases:
       - "qwen3.8-27b-dflash2"
     useModelName: "qwen3.8-27b"

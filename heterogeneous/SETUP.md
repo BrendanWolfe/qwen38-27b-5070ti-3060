@@ -7,7 +7,7 @@ Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
 |---|---|---|---|---|
 | `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 147k (147,456-token pool floor) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
 | `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
-| `start_qwen_dflash2.sh` | short-context DFlash2 | 32k (33,506-token pool) | BF16 | **~92 tok/s** avg (77–159 t/s by workload) |
+| `start_qwen_dflash2.sh` | DFlash2, long context | **88k** (97,962-token pool) | FP8 | **~85 tok/s**, acceptance 3.26 |
 | `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
 | `start_qwen_huge.sh` | full native context | **262k** (284,234-token pool) | int4 | batch only — ~112 tok/s prefill at depth |
 

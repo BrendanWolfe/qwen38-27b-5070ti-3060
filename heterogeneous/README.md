@@ -12,7 +12,7 @@ Five setups are supported:
 |---|---|---|---|---|---|
 | batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 147k (147,456-token pool floor) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
 | solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
-| short-context | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | BF16 | 32k (33,506-token pool) | **91.7 tok/s** avg (77–159 t/s by workload) |
+| DFlash2 / long | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
 | huge context | `start_qwen_huge.sh` | MTP-3, int4 per-token-head KV | int4 | **262k** (284,234-token pool) | batch only — ~112 tok/s prefill at depth |
 | fastest DFlash2 | `start_qwen_dflash2_fast.sh` | DFlash2-7, reversed 24/40 | bf16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 
@@ -174,8 +174,23 @@ With PP, vLLM's automatic KV profiling assigns the same cache budget to both
 ranks, but rank 1 (the 3060) also carries the drafter, its KV, and the target
 CUDA graphs. Auto-sizing over-allocated (~2.9 GiB KV) and then NCCL failed to
 allocate a 40-byte broadcast buffer — the card was full. `start_qwen_dflash2.sh`
-therefore sets `--kv-cache-memory=2500000000` (`DFLASH_KV_MEMORY`), which
-yields a measured 33,506-token pool at `MAX_LEN=32768`, `GPU_UTIL=0.915`.
+therefore sets `--kv-cache-memory` (`DFLASH_KV_MEMORY`) rather than trusting
+auto-sizing.
+
+That cap shipped at 2.5 GB, which was conservative: it now runs 3.2 GB with
+`KV=fp8`, for a 97,962-token pool at `MAX_LEN=88000` — 2.7x the context this
+profile used to offer, at the same decode rate (85.2 tok/s against bf16's 85.5,
+acceptance 3.26 against 3.19).
+
+**3.2 GB is the ceiling and the failure mode is a trap.** `--kv-cache-memory`
+takes memory vLLM would otherwise leave for compiled prefill on the 3060, so an
+over-large value does not fail at startup. It boots, sizes a *larger* pool,
+captures graphs, answers short prompts, and then dies with a 500 partway into
+the first long prompt — `torch.OutOfMemoryError` in the compiled prefill
+forward, failing on as little as 18 MiB. 3.4 GB and 3.6 GB both do this. The
+launcher header records the full table; every row was checked by sending a
+prompt near `MAX_LEN` and confirming `/health` still answered afterwards. A
+clean boot proves only that the pool was sized.
 
 ## Measured results
 
@@ -582,9 +597,9 @@ docker compose logs -f hetero
 | `SPEC` | `mtp` | `mtp`, `dflash2`, or `none` for a diagnostic baseline |
 | `DRAFT_TOKENS` | `3` | MTP depth; three is the FP8 long-context setting |
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
-| `DFLASH_KV_MEMORY` | `2500000000` | manual per-rank KV bytes for the DFlash2 profile |
+| `DFLASH_KV_MEMORY` | `3200000000` | manual per-rank KV bytes for the DFlash2 profile; 3.4 GB boots and then OOMs mid-request |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `147456` / `32768` / `262144` | API context limit (batch / short / solo and huge wrappers). Raising it is not free: see gotcha 38, the shipped values are the worst-draw ceilings |
+| `MAX_LEN` | `147456` / `88000` / `262144` | API context limit (batch / dflash2 / solo and huge wrappers). Raising it is not free: see gotcha 38, the shipped values are the worst-draw ceilings |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
 | `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
