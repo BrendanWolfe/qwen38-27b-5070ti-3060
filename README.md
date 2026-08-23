@@ -181,23 +181,33 @@ turn 2 over a cached 100k document costs 4.7 s against 169 s cold.
 `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` overrides the MTP line for anyone hunting
 the root cause. Treat that as unsafe rather than merely slower.
 
-It is a trade rather than a free win: dropping the full decode graphs costs
-short-prompt throughput. Same box, same script, only the capture toggled,
-three runs each:
+What that trade costs, re-measured at HEAD. The numbers this README used to carry here
+had `FULL_AND_PIECEWISE` at 38 tok/s (1.97 per step) on the 25k copy task against
+PIECEWISE's 132, and called it 3.5x. That was not the capture mode — it was the residue
+bug, which `a75ee4b` fixed. With the same server and only the capture toggled
+(`bench/labd_bench.py --ctx 20000`, `SPEC=dflash2 CTX=huge PREFIX_CACHE=1`, decode tok/s):
 
-| | `copy` @25k | de | en | code |
-|---|---|---|---|---|
-| `FULL_AND_PIECEWISE` | 38 tok/s (1.97/step) | 78 | 125 | 202 |
-| PIECEWISE (default here) | **132 tok/s (7.83/step)** | 74 | 102 | 176 |
+| | copy | code | edit | quote | summary | qa | all six |
+|---|---|---|---|---|---|---|---|
+| FULL (the default now) | 167.1 | 111.1 | 84.7 | 55.0 | 47.8 | 43.4 | 65.7 (3.03/step) |
+| PIECEWISE | 166.3 | 111.3 | 83.0 | 62.4 | 48.6 | 43.1 | 67.6 (3.18/step) |
 
-3.5x on the long shared prefix this mode exists for, 13-18% off short-prompt
-decode. **That 13-18% is short prompts only, and it does not generalise** — past
-8k the two capture modes are within noise of each other on bare metal (111.8 vs
-109.3 tok/s at 8k, 78.2 vs 86.1 at 16k, 68.9 vs 73.3 at 32k, 58.4 vs 56.0 at 50k,
-unique prompts, one server per mode). Under GPU passthrough on a VM the same
-comparison costs 2-3x, reported in [#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13)
-and consistent with the uncaptured verify being launch-bound: launches that are
-nearly free here are not free there.
+They are the same. Five of the six are within 2%; `quote` differs by 13% in PIECEWISE's
+favour, which is greedy divergence on the task that diverges most, and it is what puts
+PIECEWISE 3% ahead overall. So at this context length the capture mode is not a
+performance decision at all, in either direction.
+
+Short prompts are where a difference was measured, and that measurement is older:
+78/125/202 tok/s captured against 74/102/176 piecewise on de/en/code, i.e. **13-18%**.
+Treat that as an upper bound — @mjungnickel18 measures 0.2-2.3% for the same comparison
+when only runs with identical step counts are compared, and he is right that greedy runs
+which take a different number of steps are not comparable. Past 8k the two are within
+noise on bare metal (111.8 vs 109.3 tok/s at 8k, 78.2 vs 86.1 at 16k, 68.9 vs 73.3 at
+32k, 58.4 vs 56.0 at 50k, unique prompts, one server per mode). Under GPU passthrough on
+a VM the same comparison costs 2-3x, reported in
+[#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13) and consistent with the
+uncaptured verify being launch-bound: launches that are nearly free here are not free
+there.
 
 Two limits worth knowing before you point this at anything: what it does with
 more than one user, and what the long verify block costs.

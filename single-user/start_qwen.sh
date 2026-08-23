@@ -291,10 +291,16 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # that path. It is the capture, not the drafter: eager is clean, and so is
   # PIECEWISE, which keeps the compiled graphs and leaves only the multi-query
   # verify uncaptured.
-  #   long context, labd copy@20k   FULL 1.97 tok/step 38 tok/s
-  #                                 PIECEWISE 7.83 tok/step 132 tok/s   (3.5x)
   #   short prompts, de/en/code     FULL 78/125/202 tok/s
   #                                 PIECEWISE 74/102/176 tok/s          (-13..18%)
+  # The long-context row that used to sit above this one -- FULL 1.97 tok/step / 38 tok/s
+  # against PIECEWISE's 7.83 / 132, "3.5x" -- was measuring the residue bug, not the
+  # capture mode, and a75ee4b fixed it. Re-measured at HEAD with only the capture
+  # toggled (labd_bench --ctx 20000, dflash2 CTX=huge PREFIX_CACHE=1, decode tok/s):
+  #   copy/code/edit/quote/summary/qa  FULL      167/111/85/55/48/43   all six 65.7
+  #                                    PIECEWISE 166/111/83/62/49/43   all six 67.6
+  # i.e. the same, with `quote` diverging the way greedy does. At this context length
+  # the capture mode is not a speed decision in either direction.
   # Treat that -13..18% as an UPPER bound. @mjungnickel18 measures 0.2-2.3% for the
   # same comparison on bare metal when only runs with identical STEP COUNTS are
   # compared, and he is right that greedy runs which take a different number of steps
