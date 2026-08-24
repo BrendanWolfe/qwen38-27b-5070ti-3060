@@ -29,7 +29,7 @@
 # activation peak; the pool follows, and so does whether the server starts at
 # all. On the eight-slot batch profile an unchanged command has returned pools
 # of 146,086 / 157,500 / 184,891 tokens and refusal thresholds of 148,096 /
-# 159,744 / ~189,000. That is gotcha 38, and it is the thing to know before
+# 159,744 / ~189,000. That is gotcha 40, and it is the thing to know before
 # touching MAX_LEN anywhere in this repo.
 #
 # This profile appears to sit on the low branch. Measured at 262,144, GPUs
@@ -66,7 +66,7 @@ export SPEC=${SPEC:-mtp}
 export DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 export MAX_SEQS=${MAX_SEQS:-1}
 
-# RETRY, because 262,144 is above the worst startup-profiling draw (gotcha 38).
+# RETRY, because 262,144 is above the worst startup-profiling draw (gotcha 40).
 # This profile asks for more context than the high-activation branch can size a
 # pool for, so a launch that draws it dies in ~20 s with "estimated maximum
 # model length is 143360" instead of serving. The branch is redrawn on every
@@ -95,7 +95,7 @@ for n in $(seq 1 "$ATTEMPTS"); do
   set -e
   if [ "$rc" -ne 0 ] && grep -q 'estimated maximum model length' "$LOG" \
      && [ "$n" -lt "$ATTEMPTS" ]; then
-    echo "start_qwen_solo: startup profiling drew the high-activation branch (attempt $n/$ATTEMPTS); relaunching to redraw it. See gotcha 38." >&2
+    echo "start_qwen_solo: startup profiling drew the high-activation branch (attempt $n/$ATTEMPTS); relaunching to redraw it. See gotcha 40." >&2
     continue
   fi
   exit "$rc"

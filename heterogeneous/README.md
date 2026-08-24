@@ -326,7 +326,7 @@ documents the backport.
 This file previously claimed the patch also bought 9,131 tokens of pool
 (146,847 -> 155,978) by lowering the profiled peak activation. That is
 withdrawn. Both numbers are ordinary draws from the startup-profiling lottery
-in gotcha 38, which spans 146,086 to 188,769 tokens on this profile with no
+in gotcha 40, which spans 146,086 to 188,769 tokens on this profile with no
 code change at all. The patch may or may not help the pool; one run each
 cannot tell, and nothing here has measured it properly.
 
@@ -639,7 +639,7 @@ docker compose logs -f hetero
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
 | `DFLASH_KV_MEMORY` | `3200000000` | manual per-rank KV bytes for the DFlash2 profile; 3.4 GB boots and then OOMs mid-request |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `147456` / `88000` / `262144` | API context limit (batch / dflash2 / solo and huge wrappers). Raising it is not free: see gotcha 38, the shipped values are the worst-draw ceilings |
+| `MAX_LEN` | `147456` / `88000` / `262144` | API context limit (batch / dflash2 / solo). Raising it is not free: see gotcha 40, the shipped values are the worst-draw ceilings |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
 | `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
