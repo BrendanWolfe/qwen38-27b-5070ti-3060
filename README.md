@@ -113,8 +113,18 @@ Honest tradeoffs versus the GGUF setup:
   workaround; here it would undo the reason `bf16` and `int8pth` are the
   preferred KV modes (they are the ones that keep full graphs under
   spec-decode), so the runner is fixed instead. The failure rate on this pair
-  is **not** measured — upstream's "one prompt length in every 128" is a
-  consequence of `--prefix-match-unit 128`, which these profiles do not set.
+  is **not** measured. This used to add "upstream's *one prompt length in every
+  128* is a consequence of `--prefix-match-unit 128`, which these profiles do
+  not set" — which is wrong for one of them: `KV=kvarn` sets it, to match the
+  128-tile the pool is built on, so `start_qwen_solo.sh` is exactly the profile
+  where a 128-residue structure could exist. It is also the profile with the
+  longest attention block. Measuring it is no longer hand-rolled work:
+  `bench/residue_sweep.py` walks all 128 residues one token at a time and
+  `bench/verbatim.py` scores whether the copy came back, rather than testing
+  for a symptom — upstream's own three damage shapes at one broken residue are
+  why signature rules do not work. That sweep against solo, and a
+  `CUDAGRAPH_MODE` A/B on the same server, is what would turn "fixed" from an
+  argument into a measurement.
 - **MTP + pipeline parallelism** — `patches/vllm-pr46994-mtp-pp.patch`, a
   backport of upstream PR #46994 (MTP on the V2 runner under PP) plus the
   hybrid-Mamba int64 `index_fill_` fix PP long prefill needs. It is applied by

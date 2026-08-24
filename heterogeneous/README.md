@@ -407,7 +407,8 @@ weight.
 Nothing else gated it. `max_concurrent_batches` is already 3 (PP=2 plus async
 scheduling on the V2 runner, `config/vllm.py`), `max_cudagraph_capture_size` is
 derived as `MAX_SEQS * (DRAFT_TOKENS + 1)` so the captured shapes grow with the
-ceiling, and `long_prefill_token_threshold` is 0 with decode tokens placed in
+ceiling (capped at 64 query tokens since the upstream merge — inert at every
+profile here, see gotcha 38), and `long_prefill_token_threshold` is 0 with decode tokens placed in
 the batch ahead of prefill chunks, so concurrent streams are not starved by one
 long prefill. The GDN recurrent state — which `docs/optimizations.md` records
 as the real concurrency bound on this architecture — is already handled by
@@ -429,6 +430,37 @@ TTFT at **2,955 ms** as 64 prompts queue behind a 2,048-token prefill budget.
 `MAX_SEQS=16` is the right override for batch or throughput work, where TTFT
 does not matter; it costs nothing at low load.
 
+**Seats are admissions; residency is pool-shaped.** Upstream measured this on
+one 3090 and the mechanism applies here too: `MAX_SEQS` decides how many
+requests are *admitted*, but every request that is actually *resident* reserves
+its `1+k` recurrent-state slots out of the same pool before it stores a single
+token of context — 0.88 GiB at DFlash2 `k=7` against 0.44 GiB at MTP `k=4`.
+Past the point where the pool runs out, extra seats queue and then preempt. On
+one 3090 at `CTX=fast` that ceiling is six DFlash2 residents and eight MTP, and
+raising `MAX_SEQS` there buys nothing.
+
+This pair's answer came out the other way — eight seats being +41% — because
+the constraint binds much later here: MTP-3 has the smallest state page of the
+three (`k+2 = 5`) and the batch pool is 147k+ tokens, so the C8 row above is
+measured throughput with nothing preempted, not an admission count. Both
+statements hold; the *number* is what does not transfer. If you change `SPEC`,
+`DRAFT_TOKENS` or `KV` and want the residency for that shape rather than the
+seat count, `bench/conc_ladder.py` now reports it directly — decode aggregate
+over the window in which all N streams are genuinely decoding, `ms/pass`,
+preemptions, peak pool occupancy and the per-stream spread, on salted prompts
+that cannot hit the prefix cache.
+
+Read gotcha 39 the same way. It found `MAX_SEQS > 12` *fatal* at `CTX=huge` on
+a 24 GiB 3090 — boots, captures, serves `/health`, then dies on the first
+prompt because the per-seat allocations ate the headroom the first prefill
+needs. That is a VRAM budget rather than a shape, so it is specific to a card
+and a pinned pool, and the `MAX_SEQS=16` row above is not a refutation of it:
+that run is the batch profile, whose pool comes from `GPU_UTIL` rather than
+from a pinned `--kv-cache-memory`. The profile here that *is* pinned is
+DFlash2, at `DFLASH_KV_MEMORY=3200000000` and four seats, and it has never been
+run above four. Raising seats on a pinned pool is the case to check before
+trusting.
+
 ### 262k on int4 per-token-head KV
 
 This is the route to the full native context that `start_qwen_solo.sh`
@@ -436,6 +468,13 @@ replaced. It no longer has a launcher of its own; reach it with
 `KV=int4pth MAX_LEN=262144 MAX_SEQS=4 bash heterogeneous/start_qwen.sh`. It is
 still the only 262k shape here that keeps four scheduler slots, which is the
 one thing solo gives up, so the measurements stay.
+
+Read those four slots as admissions, not as four concurrent 262k requests: the
+pool is 284,234 tokens, so one request at full depth is the whole of it. What
+the slots buy is a server that accepts one very long request *and* three
+ordinary ones — which solo, at `MAX_SEQS=1`, cannot do at all. That is the
+distinction the concurrency section above draws, and it is the reason to keep
+this shape rather than a reason to prefer it at depth.
 
 `--kv-cache-dtype int4_per_token_head --attention-backend TRITON_ATTN` holds a
 **284,234-token pool** at `MAX_LEN=262144`, which FP8 cannot reach at any
@@ -647,6 +686,9 @@ docker compose logs -f hetero
 | `ASYNC_SCHED` | `1` | asynchronous vLLM scheduler |
 | `INT8_ACT` | empty | W4A16 target; int8 activation GEMMs do not help batch size one |
 | `NO_API_KEY` | unset | `1` disables child auth for a trusted local proxy |
+| `VISION` | `0` | `1` keeps the vision tower instead of `--language-model-only`. Untested on this pair: `model.visual.*` loads on rank 0, the card that binds the KV pool, so its 0.858 GiB and the encoder's profiled peak both come out of the scarce side |
+| `CUDAGRAPH_MODE` | unset | forces `PIECEWISE` / `FULL_AND_PIECEWISE` instead of vLLM's choice. Nothing here pins it — the runner fix makes that unnecessary — but A/B-ing the capture mode on one server needs the knob |
+| `CG` | `MAX_SEQS * (DRAFT_TOKENS + 1)`, capped at 64 | captured decode-graph size. Raise `VLLM_V2_CUDAGRAPH_MEM_MIB` with it if you override past the cap |
 
 Examples:
 
