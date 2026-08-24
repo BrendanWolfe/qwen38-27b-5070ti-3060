@@ -516,6 +516,80 @@ GDN page, and every slot pays a full aligned page. At four slots it does not
 fit at 262k at all, which is why the int4pth numbers above are still the
 four-slot answer.
 
+### DFlash2 on KVarN: 122,880 context, measured
+
+Upstream added a KVarN route under DFlash2 (`SPEC=dflash2 CTX=huge`, 245,760 on
+one 24 GiB 3090). It had never been run on this pair. It works, but not at the
+context upstream reaches, and the reason is structural rather than a tuning
+miss: DFlash2 holds `1+k` recurrent-state slots per request against MTP-3's
+`1+k` at k=3, and under KVarN every slot pays a full **aligned** page — 2176
+tokens at `DFLASH_TOKENS=7` (17x128; the 2048 figure quoted elsewhere in this
+repo is the k=3 block, and the size follows the speculator, gotcha 37).
+
+Sizing, read straight off the refusal message, which reports what one request at
+`max_model_len` needs against what the pool has:
+
+| geometry | k | needed at 262,144 | available | ceiling |
+|---|---:|---:|---:|---:|
+| `0,1` / `44,20` | 7 | 3.69 GiB | 2.45 | 130,560 |
+| `0,1` / `44,20` | 5 | 3.56 GiB | 2.45 | 143,616 |
+| `0,1` / `44,20` | 3 | 3.07 GiB | 2.45 | 196,608 |
+| `1,0` / `28,36` | 7 | 2.46 GiB | 2.32-2.37 | 241,536-248,064 |
+| `1,0` / `32,32` | 7 | 2.46 GiB | 1.62 | 128,384 |
+
+**Geometry is the large lever, and 44/20 is the worst case for it.** That split
+puts 11 of the 16 full-attention layers on rank 0, so the per-token KV bill on
+the binding rank is ~10.1 KB (920 B per token per layer, consistent to 1% across
+all three k). Reversing to `28,36` leaves 8 there and drops it to ~7.3 KB, worth
+about 110k tokens of ceiling. Pushing further to `32,32` is worse, not better:
+it moves four layers back onto the 12 GiB card, which then becomes the binding
+rank at 1.62 GiB. The optimum is at or near `28,36`.
+
+**None of that is shippable unpinned.** The reversed split puts the LM head and
+sampler on rank 1, which is also the rank that binds KVarN's pool, so gotcha 40's
+lottery lands directly on the constraint. Across 13 launches, `available` was
+2.32-2.45 GiB twelve times and **0.91-0.95 GiB twice** — a 1.42 GiB swing, which
+is gotcha 40's 0.32-vs-1.24 GiB activation peak almost exactly. On the low draw
+the same command's ceiling is 6,400 tokens. Eight consecutive identical draws in
+the middle of that sample said "deterministic" and were wrong, which is the
+specific error gotcha 40 warns about; do not read agreement as determinism here.
+
+**Pinning removes the lottery, and that is the profile.** With
+`--kv-cache-memory=2147483648` the reported `available` is exactly 2.00 GiB and
+the pool is 123,407 tokens on every launch (3 of 3, bit-identical). Measured:
+
+```
+GPU_IDS=1,0 PP_LAYERS=28,36 SPEC=dflash2 DFLASH_TOKENS=7 SPEC_ATTN=0 \
+  KV=kvarn MAX_SEQS=1 MAX_LEN=122880 \
+  EXTRA_ARGS=--kv-cache-memory=2147483648 bash heterogeneous/start_qwen.sh
+```
+
+| | shipped DFlash2 | this |
+|---|---:|---:|
+| geometry / KV | `44,20`, fp8 | `1,0` `28,36`, KVarN 4/2-bit |
+| context | 88,000 | **122,880** |
+| pool | 97,962 | **123,407** (3/3 identical) |
+| decode, `bench/real_rep.sh` C1 x3 | 85.17 tok/s | **88.83-88.95** (91.4-91.5 decode-only) |
+| tokens/step | 3.26 | 3.29 |
+| ms/step | — | 37.0 |
+| needle | PASS @ 80,035 | PASS @ 32,040 and **@ 110,055** |
+| prefill at depth | — | 754 tok/s at 110k, 923-962 at 32k |
+
+`/health` answered 200 after every long prompt, which is the check that matters:
+this profile family's failure mode is booting, capturing graphs, serving short
+prompts and then dying with a 500 partway into the first long one. Boot is 145 s
+cold, 30-35 s warm.
+
+So KVarN buys 40% more context here and costs nothing — decode is 4.4% *ahead*
+of the fp8 profile on the same harness, and acceptance is unchanged at 3.29.
+
+Two limits worth stating. 2.0 GiB is a **validated** pin, not an optimal one:
+180,224 needs 2.43 GiB, which is above what profiling reports as available even
+on a good draw, and raising the pin is the exact move that produces the
+boots-then-dies failure, so each higher value needs its own long-prompt probe.
+And `SPEC_ATTN=0` is mandatory, not a tuning choice — the split-KV verify
+attention is bf16-KV only and KVarN brings its own dequant path.
+
 ### DFlash2: KV dtype, pipeline order and where the layers go
 
 The shipped DFlash2 profile assumed BF16 KV. That assumption was never tested

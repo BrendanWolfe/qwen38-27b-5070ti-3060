@@ -147,6 +147,12 @@ elif [ "$SPEC" = "dflash2" ]; then
   # this pair of settings (SPEC=dflash2 CTX=huge). Default it off here rather
   # than letting KV=kvarn inherit the 1 that every other KV mode wants. Still
   # overridable, but there is no known reason to.
+  #
+  # This combination is now measured on this pair, not just guarded: reversed
+  # 28,36 with a 2.0 GiB pinned pool serves 122,880 context at 88.9 tok/s, a
+  # 110k needle passes and decode beats the fp8 DFlash2 profile. It does NOT
+  # reach 262k at any split tried -- DFlash2's 1+k aligned state pages cost more
+  # than KVarN's density saves. See heterogeneous/README.md, "DFlash2 on KVarN".
   if [ "$KV" = "kvarn" ]; then
     export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-0}
   else
