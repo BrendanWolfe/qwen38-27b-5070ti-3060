@@ -142,7 +142,16 @@ elif [ "$SPEC" = "dflash2" ]; then
   }
   DRAFT_TOKENS=${DFLASH_TOKENS:-7}
   export VLLM_DFLASH2_LOOKUP=${LOOKUP:-1}
-  export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+  # The split-KV verify attention is bf16-KV only. KVarN brings its own dequant
+  # path, so the two cannot both be on -- upstream runs SPEC_ATTN=0 for exactly
+  # this pair of settings (SPEC=dflash2 CTX=huge). Default it off here rather
+  # than letting KV=kvarn inherit the 1 that every other KV mode wants. Still
+  # overridable, but there is no known reason to.
+  if [ "$KV" = "kvarn" ]; then
+    export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-0}
+  else
+    export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+  fi
   # The shared target lm_head is Marlin-quantized. Its candidate GEMM currently
   # fails inside DFlash's private CUDA graph, so keep only the drafter eager;
   # target-model compilation and CUDA graphs remain enabled.
