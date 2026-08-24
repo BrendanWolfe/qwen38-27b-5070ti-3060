@@ -485,3 +485,36 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not the cause —
     clearing it gave three low draws in a row and then a high one. Do not clear
     it hoping to pin the branch; gotcha 3 still applies.
+
+41. **A pinned KV pool passing its sizing check does not predict whether the
+    server will survive a request.** `--kv-cache-memory` skips memory profiling
+    entirely. The `available` value used by the KV sizing path is then the pool
+    budget you selected, not a measurement of the free VRAM each rank will have
+    for CUDA graphs, prefill workspaces and communication after weights and the
+    pin are resident. A reproducible pool only proves reproducible sizing.
+
+    The heterogeneous DFlash2+KVarN sweep produced three different
+    configurations that booted cleanly, reported the expected healthy pool and
+    answered `/health` 200, then died later: one during CUDA graph capture, one
+    on the first real prefill, and one on an NCCL allocation. Real survival was
+    gated by per-rank free VRAM after weights plus the pin. The rough boundaries
+    measured on the reversed RTX 3060 + RTX 5070 Ti pipeline were:
+
+    - rank 1 (5070 Ti, also holding the drafter and LM head) needs about **2.86
+      GiB or more** spare;
+    - rank 0 (3060) fails somewhere at or below **1.57 GiB** spare; that boundary
+      was not fully bracketed;
+    - one target layer moves about **0.2307 GiB** between ranks (6.46 GiB / 28
+      layers measured on the 3060), so the PP partition is the direct way to buy
+      headroom on one card by spending it on the other.
+
+    The validated `GPU_IDS=1,0 PP_LAYERS=30,34` shape keeps enough on both sides
+    with a 2.8 GB pin; `heterogeneous/README.md` records the 200,192-token prompt
+    validation. For every new pin or partition, require a real prompt followed
+    by `/health` — startup and an initial 200 are setup checks, not validation.
+
+    Keep the tuning process itself safe. Inspect GPU state with plain,
+    read-only `nvidia-smi`; do **not** enumerate users with
+    `nvidia-smi --query-compute-apps` (that crashed the desktop on this host).
+    Stop only process groups whose IDs were recorded in `.pgid`; never kill
+    unrelated GPU or desktop processes discovered during inspection.

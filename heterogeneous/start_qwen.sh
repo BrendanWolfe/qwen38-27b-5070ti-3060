@@ -149,10 +149,10 @@ elif [ "$SPEC" = "dflash2" ]; then
   # overridable, but there is no known reason to.
   #
   # This combination is now measured on this pair, not just guarded: reversed
-  # 28,36 with a 2.0 GiB pinned pool serves 122,880 context at 88.9 tok/s, a
-  # 110k needle passes and decode beats the fp8 DFlash2 profile. It does NOT
-  # reach 262k at any split tried -- DFlash2's 1+k aligned state pages cost more
-  # than KVarN's density saves. See heterogeneous/README.md, "DFlash2 on KVarN".
+  # 30,34 with a 2.8 GB (2.61 GiB) pinned pool serves 200,192 context at
+  # 83.06-86.63 tok/s e2e; a 190,057-token needle passes. It does NOT reach
+  # 262k -- DFlash2's 1+k aligned state pages cost more than KVarN's density
+  # saves. See heterogeneous/README.md, "DFlash2 on KVarN".
   if [ "$KV" = "kvarn" ]; then
     export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-0}
   else
