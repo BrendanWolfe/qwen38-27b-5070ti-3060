@@ -552,3 +552,20 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     draft tokens past a reasoning end that landed mid-window, a rejection the code
     explicitly tolerates. It is noise, the request completes normally, and it
     predates (and survives) this fix.
+
+41. **sm80 (GA100) Marlin repack can Xid-31 the whole card under memory
+    pressure — and the kernel in the traceback is innocent.** Community
+    finding, [@ahnguyen17 in #27](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/27#issuecomment-5397500895),
+    on a CMP 170HX 40 GB: with ~27 GB resident, `gptq_marlin_repack`'s GB-scale
+    int64 intermediates (k×n int64 ≈ 1.4 GB per 27B layer, several live at
+    once) churn sm80 VMM mappings until an unrelated, trivially correct
+    elementwise kernel takes an async write fault — the faulting frame drifts
+    between runs, the Xid 31 wedges the card until reboot, and
+    `compute-sanitizer` is clean on sm86 with identical inputs. Their
+    workaround, serving in production since: compute the repack on CPU
+    (bit-exact, ~3 min extra boot) —
+    [`sm80-int8-repack-cpu-fallback.patch`](https://github.com/ahnguyen17/cmp-170hx-vllm)
+    — with `expandable_segments` kept **off**, which on that card is an
+    independent Xid-31 trigger. Not shipped here (no sm80 to regression-test
+    against); recorded so the next GA100/A100 report starts from the answer
+    instead of from five reboots.

@@ -24,6 +24,23 @@
 #  - kv-cache-dtype fp8 roughly doubles the usable context/pool
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# flashinfer-cubin (the no-nvcc route, README Setup) publishes 0.6.13 against
+# flashinfer-python 0.6.16.post3; without this the import refuses the pair (#35).
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# A dead engine leaves its OffloadingConnector region behind as
+# /dev/shm/vllm_offload_*.mmap; the next boot then dies with OSError: Bad
+# address in shared_offload_region.py, and under restart policies that loops
+# (#33 found 70 ghosts after one host OOM). Unlink stale regions no live
+# process maps. VLLM_OFFLOAD_KEEP_SHM=1 skips this (several engines sharing
+# /dev/shm across namespaces, where the liveness scan cannot see the owner).
+if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    [ -e "$f" ] || continue
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[start_qwen] removing stale offload region $f"; rm -f "$f"; }
+  done
+fi
 REPO="$(dirname "$DIR")"
 cd "$REPO"
 
