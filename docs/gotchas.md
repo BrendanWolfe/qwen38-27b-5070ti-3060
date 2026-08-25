@@ -78,6 +78,19 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
    tiles over PCIe inside the inner loop. The patch forces the bulk-copy path and does
    not touch what `--cpu-offload-gb` does elsewhere -- which could not reach the tower
    anyway, since the offloader is only installed in `make_layers()`.
+
+   One precision from re-verifying the premise on a headless 3090, same 250 W:
+   with nothing else on the card, `VISION_OFFLOAD=0` *does* boot -- and lands at
+   440 MiB free after boot, inside gotcha 39's kill zone (396 MiB free died on a
+   concurrent burst where 436 survived). The hard no-boot above needs something
+   else holding a share of the card -- the measuring box also ran a desktop
+   compositor and a browser, which is the normal state of a 3090 in a
+   workstation. Same conclusion from both geometries: a resident tower puts the
+   engine at the headroom cliff, the offload puts it at the full margin, and
+   that is why the default is on. On the current tree the pool prints 68,605
+   tokens (`KV_MEM` has moved since the 69,758 above was measured), identical
+   between `VISION=0` and `VISION=1`, and the image round-trip reads a marker
+   that exists only in the pixels either way.
 10. **`prompt_logprobs` on long prompts OOMs the engine at 0.972 utilization**
     (a 300-token prompt needs ~300 MB of fp32 logits and there is no headroom).
     Run quality checks at 0.93.
