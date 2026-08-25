@@ -491,3 +491,28 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     Worth reading next to the concurrency section of the README: seats above the
     residency were already useless (they queue, then preempt). Past 12 at `CTX=huge`
     they stop being useless and become fatal.
+
+40. **Tool calling / structured output under a speculator killed requests at the
+    grammar's end** ([#31](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/31),
+    fixed by `patches/xgrammar-spec-terminated.patch`). A speculative verify window
+    can legally accept tokens past the point where the xgrammar matcher terminates —
+    the newline after a closing `</tool_call>` tag, the stop token itself, anything
+    after it under `ignore_eos`. 0.27.1 treats both arrivals as failure, the
+    scheduler logs `Unexpected: grammar rejected tokens ... Terminating request`,
+    and the client gets an HTTP error for a request whose output was completely
+    valid. The longer the verify block, the more reliably the window covers the
+    tokens around the stop, which is why `DFLASH_TOKENS=15` + `--tool-call-parser`
+    surfaced it first. Reproduced on the shipped config with a `json_schema` +
+    `ignore_eos` request — `grammar rejected tokens [16, 22, 198, 92, 248046, 198]`,
+    where 92 is the brace that completes the JSON, 248046 the stop token that
+    terminates the matcher, and the trailing newline killed the request. The patch
+    backports upstream's current semantics: tokens after termination are ignored,
+    real mid-grammar rejections still fail loudly.
+
+    Two log signatures to keep apart, because they look alike. The fatal one is the
+    `grammar rejected tokens` line above — gone with the patch. The non-fatal one is
+    a burst of `Failed to advance FSM for request ... Please file an issue.` with
+    **no** `Terminating request` after it: that is the bitmask builder advancing
+    draft tokens past a reasoning end that landed mid-window, a rejection the code
+    explicitly tolerates. It is noise, the request completes normally, and it
+    predates (and survives) this fix.
