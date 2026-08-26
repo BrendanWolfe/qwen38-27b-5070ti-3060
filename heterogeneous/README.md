@@ -578,12 +578,22 @@ a clean boot and an initial health check are only setup. `SPEC_ATTN=0` also
 remains mandatory: the split-KV verify attention is bf16-KV only and KVarN
 brings its own dequant path.
 
-### KVarN on the batch profiles: one loss and one win
+### KVarN on the batch profiles: longer context, with different constraints
 
-KVarN does **not** help the eight-seat MTP batch profile. At the shipped
-`44,20` geometry with `MAX_SEQS=8`, it produced a **106,400-token pool**, well
-below FP8's 147,456-token worst-case floor. A 64,955-token retrieval passed and
-left `/health` at 200, but there is no context win to ship; MTP batch stays FP8.
+KVarN does help the eight-seat MTP batch profile. The original 70k-capped test
+reported a 106,400-token pool, but that was one high-activation startup draw
+and was incorrectly treated as a capacity comparison. At the same shipped
+`44,20` geometry with `MAX_SEQS=8`, a low-activation draw booted at the full
+**262,144-token** native context with a **289,641-token pool**. A
+**240,035-token** retrieval passed at 684 prompt tok/s and left `/health` at
+200. The eight-seat tail pool adds only 14 fp16 slots over the one-seat shape
+(40 instead of 26), so it does not erase KVarN's per-token density win.
+
+Startup remains the constraint: high-activation draws in this sweep refused
+245,760 and 262,144 with estimated limits of 124,928--135,168, while the next
+262,144 draw booted cleanly. The FP8 batch launcher therefore remains the
+reliable default until the KVarN batch route gets the solo launcher's bounded
+retry behavior; the result is not evidence that FP8 holds more context.
 
 DFlash2 is different. With the solo profile's reversed `30,34` geometry,
 `MAX_SEQS=4`, a 2.4 GB pin and `MAX_LEN=147456`, KVarN produced a reproducible
