@@ -85,7 +85,28 @@ document, exact-match recall:
 profile cannot exceed 65,536 tokens, so only the first rung has a like-for-like control.
 This demonstrates that KVarN recalls correctly at 218k — not that it equals bf16 there.
 
-## Not reproduced
+## Prompt shape dominates, and it explains a reported number
+
+A community report of ~208 tok/s did not match our first prose measurement (107.2), and the
+author later published the prompt and the distinction: **200 was a peak, the average on that
+prompt was ~160, and it was "very simple, code heavy output" — "Please write a Tetris clone
+that can run in a browser."** Prose, he noted, runs 100–120.
+
+Running that exact prompt here, same configuration, three consecutive runs within 0.2%:
+
+| prompt | ours | reported |
+|---|---:|---:|
+| *"Please write a Tetris clone that can run in a browser."* | **188.3** | ~160 avg, 200 peak |
+| reflective prose essay | **113.1** | 100–120 |
+
+Both land inside or above the reported band. **The discrepancy was never hardware or
+configuration — it was that code generation and prose are different workloads.** `LOOKUP`
+drafting predicts repetitive structure well (braces, indentation, boilerplate), so long runs
+clear per verify step; prose branches more and accepts less.
+
+**A tok/s figure for this stack is meaningless without the prompt that produced it.**
+
+## Earlier, before the prompt was known
 
 A community report of **~208 accepted tok/s** on a 3090 at `CTX=long` with a basic prompt
 did not reproduce here: **107.2 tok/s median**, same posted configuration
