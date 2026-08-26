@@ -12,19 +12,20 @@ two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
 ## Supported setups
 
-| profile | launcher | speculation / slots | KV | context | measured decode |
+| profile | launcher | speculation / slots | KV | context | measured result |
 |---|---|---|---|---|---|
 | **batch / general** | `heterogeneous/start_qwen_batch.sh` | MTP-3 / 8 | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at C4 |
 | **solo / long** | `heterogeneous/start_qwen_solo.sh` | MTP-3 / 1 | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, C1 only |
-| **DFlash2 / long** | `heterogeneous/start_qwen_dflash2.sh` | DFlash2-7 / 4 | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
+| **DFlash2 / batch** | `heterogeneous/start_qwen_dflash2_batch.sh` | DFlash2-7 / 4 | KVarN 4/2-bit | **147k** (151,503-token pool) | four requests complete; three resident at 4k |
+| **DFlash2 / solo** | `heterogeneous/start_qwen_dflash2_solo.sh` | DFlash2-7 / 1 | KVarN 4/2-bit | **200k** (202,174-token pool) | **83.1–86.6 tok/s**, C1 only |
 
-The decode column is `bench/real_rep.sh` — 8 realistic 1,024-token prompts at
-concurrency 1, 3 reps — so the rows are comparable to each other. DFlash2's
-speed is strongly workload-dependent (77–159 tok/s across the range); the
-earlier headline of 91.7 tok/s came from a different prompt mix and is not
-comparable to these.
+Speed figures use `bench/real_rep.sh` — 8 realistic 1,024-token prompts at
+concurrency 1, 3 reps. The DFlash2 batch row instead reports its measured
+four-request residency test. DFlash2's speed is strongly workload-dependent
+(77–159 tok/s across the range); the earlier headline of 91.7 tok/s came from
+a different prompt mix and is not comparable to these.
 
-All three use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
+All four use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
 vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
 8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the batch
 profile.
@@ -128,16 +129,16 @@ Honest tradeoffs versus the GGUF setup:
   the target keeps compilation and graphs).
 - **Launchers** — `heterogeneous/start_qwen.sh` (shared, tunable),
   `start_qwen_batch.sh` (frozen MTP snapshot), `start_qwen_solo.sh` (262k
-  single-stream KVarN) and `start_qwen_dflash2.sh` (32k DFlash2). They encode
+  single-stream KVarN), `start_qwen_dflash2_batch.sh` (147k KVarN), and
+  `start_qwen_dflash2_solo.sh` (200k KVarN). They encode
   the host/toolchain fixes this pair needed: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
   `TORCH_CUDA_ARCH_LIST="8.6;12.0"`, GCC 15 for CUDA 13.3's JIT, unsetting
   `VLLM_MARLIN_INPUT_DTYPE` for W4A16, `GPU_UTIL=0.91` (0.93 OOMed compiled
   prefill), process-group cleanup under `setsid`, `NO_API_KEY` mode, and the
   vLLM flags for accurate per-request metrics and Qwen tool calling.
-- **llama-swap** — the two model entries in
-  `heterogeneous/llama-swap.example.yaml`:
-  `vllm-speed/qwen3.8-27b-batch`, `vllm-speed/qwen3.8-27b-solo` (262k) and `vllm-speed/qwen3.8-27b-dflash2`
-  (unprefixed IDs kept as aliases).
+- **llama-swap** — the four model entries in
+  `heterogeneous/llama-swap.example.yaml`: MTP batch/solo and DFlash2
+  batch/solo (unprefixed IDs kept as aliases).
 - **Docker** — a `hetero` compose profile (two-GPU reservation) and a `hetero`
   entrypoint command.
 

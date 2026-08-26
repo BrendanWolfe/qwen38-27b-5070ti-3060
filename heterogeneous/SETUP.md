@@ -1,13 +1,14 @@
 # Setup guide — RTX 5070 Ti + RTX 3060 (from zero to serving)
 
 Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
-**12 GiB RTX 3060**. By the end you will have three working profiles:
+**12 GiB RTX 3060**. By the end you will have four working profiles:
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
 | `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 147k (147,456-token pool floor) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
 | `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
-| `start_qwen_dflash2.sh` | DFlash2, long context | **88k** (97,962-token pool) | FP8 | **~85 tok/s**, acceptance 3.26 |
+| `start_qwen_dflash2_batch.sh` | DFlash2, 4 scheduler seats | **147k** (151,503-token pool) | KVarN 4/2-bit | C4 completes; 3 resident at 4k |
+| `start_qwen_dflash2_solo.sh` | DFlash2, one stream | **200k** (202,174-token pool) | KVarN 4/2-bit | **~83–87 tok/s** |
 
 Everything is driven by this fork (`BrendanWolfe/qwen38-27b-5070ti-3060`) of
 [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090) —
@@ -144,21 +145,29 @@ bash heterogeneous/start_qwen_batch.sh
   [README.md](README.md)), and an FP8 KV pool of at least 147,456 tokens —
   often more, because the startup profile is a lottery (gotcha 40). Keep it in a `tmux` session or a systemd unit for long runs.
 
-### DFlash2 profile (short context, fastest decode)
+### DFlash2 batch profile (four scheduler seats)
 
 ```bash
-bash heterogeneous/start_qwen_dflash2.sh
+bash heterogeneous/start_qwen_dflash2_batch.sh
 ```
 
-Same endpoint/port/model name, but BF16 KV, 32k context, and DFlash2 drafting
-(~92 tok/s average; real traffic measures **77–159 t/s** depending on the
-workload — the high end on long generations and on copy/quote/edit tasks,
-where the lookup drafter proposes straight from the prompt). It pins
-`--kv-cache-memory=2500000000` on purpose: vLLM's
-automatic sizing over-allocates the 3060 rank (which also carries the drafter)
-until NCCL cannot even allocate a 40-byte buffer. If you change `MAX_LEN`,
-re-tune `DFLASH_KV_MEMORY` — too low fails startup with a "KV cache is needed,
-larger than the available" error, too high OOMs rank 1 during graph capture.
+This uses DFlash2-7 with KVarN 4/2 KV, a reversed `30,34` pipeline, four
+scheduler seats, and a manually pinned 2.4 GB cache. It exposes 147,456 context
+in a measured 151,503-token pool. A 140,028-token retrieval probe passed and
+four distinct 4k requests completed without preemption; three were resident
+while the fourth queued. Do not raise the pin to the solo profile's 2.8 GB:
+that configuration passed one 150k request but OOMed rank 1 at concurrency 4.
+
+### DFlash2 solo profile (one stream, 200k)
+
+```bash
+bash heterogeneous/start_qwen_dflash2_solo.sh
+```
+
+The one-seat variant keeps the same KVarN/reversed-pipeline layout and spends
+the freed runtime headroom on a 2.8 GB cache: 200,192 context in a measured
+202,174-token pool. A 190,050-token retrieval probe passed and `/health`
+remained 200 afterward.
 
 ### Non-speculative fallback (diagnostics)
 
@@ -168,13 +177,16 @@ SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
 
 ## 8. (Optional) llama-swap front door
 
-Install llama-swap, then merge the three model entries from
+Install llama-swap, then merge the four model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
 - `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`);
   keeps `vllm-speed/qwen3.8-27b` as an alias so existing clients keep working
-- `vllm-speed/qwen3.8-27b-dflash2` — DFlash2, 88k context (`start_qwen_dflash2.sh`)
+- `vllm-speed/qwen3.8-27b-dflash2-batch` — DFlash2, 147k context
+  (`start_qwen_dflash2_batch.sh`)
+- `vllm-speed/qwen3.8-27b-dflash2-solo` — single-stream DFlash2, 200k context
+  (`start_qwen_dflash2_solo.sh`)
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 
 If you rename a launcher, remember that llama-swap holds absolute paths — grep

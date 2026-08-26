@@ -6,13 +6,14 @@ consumer GPUs**: a 16 GiB RTX 5070 Ti (`sm120`, CUDA logical device 0) and a
 repository's fast model variant, and both speculative decoders (MTP and
 DFlash2).
 
-Three setups are supported:
+Four setups are supported:
 
-| profile | launcher | speculation | KV | context | measured decode |
+| profile | launcher | speculation | KV | context | measured result |
 |---|---|---|---|---|---|
 | batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 147k (147,456-token pool floor) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
 | solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
-| DFlash2 / long | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
+| DFlash2 / batch | `start_qwen_dflash2_batch.sh` | DFlash2-7, four scheduler seats | KVarN 4/2-bit | **147k** (151,503-token pool) | C4 completes; three requests resident at 4k |
+| DFlash2 / solo | `start_qwen_dflash2_solo.sh` | DFlash2-7, one scheduler seat | KVarN 4/2-bit | **200k** (202,174-token pool) | **83.1–86.6 tok/s**, C1 only |
 
 `start_qwen.sh` is the shared, tunable launcher every profile wraps.
 
@@ -67,11 +68,13 @@ free, use it; nothing here depends on it.
   MTP/DFlash2/no-spec selection, process-group cleanup, no-auth mode.
 - `heterogeneous/start_qwen_batch.sh` — frozen MTP snapshot used by the
   general llama-swap model, so later experiments cannot change its behavior.
-- `heterogeneous/start_qwen_dflash2.sh` — 88k DFlash2 profile (FP8 KV,
-  manually sized cache, eager drafter; see below).
+- `heterogeneous/start_qwen_dflash2_batch.sh` — 147k, four-seat DFlash2
+  profile (KVarN KV, reversed pipeline, manually sized cache).
+- `heterogeneous/start_qwen_dflash2_solo.sh` — 200k, one-seat DFlash2
+  profile (KVarN KV, reversed pipeline, manually sized cache).
 - `heterogeneous/start_qwen_solo.sh` — 262k single-stream KVarN MTP profile
   (one scheduler slot, 4-bit keys / 2-bit values).
-- `heterogeneous/llama-swap.example.yaml` — the three llama-swap model entries.
+- `heterogeneous/llama-swap.example.yaml` — the four llama-swap model entries.
 - `patches/vllm-pr46994-mtp-pp.patch` — MTP + pipeline parallelism (below).
 - `patches/vllm-pr52297-gdn-common-metadata.patch` — upstream PR #52297,
   backported. No measurable speed change here, but +6.2% KV pool; see
@@ -168,14 +171,15 @@ pipeline parallel is not supported`). This patch adds the missing machinery:
 With PP, vLLM's automatic KV profiling assigns the same cache budget to both
 ranks, but rank 1 (the 3060) also carries the drafter, its KV, and the target
 CUDA graphs. Auto-sizing over-allocated (~2.9 GiB KV) and then NCCL failed to
-allocate a 40-byte broadcast buffer — the card was full. `start_qwen_dflash2.sh`
-therefore sets `--kv-cache-memory` (`DFLASH_KV_MEMORY`) rather than trusting
+allocate a 40-byte broadcast buffer — the card was full. Both DFlash2 wrappers
+therefore set `--kv-cache-memory` (`DFLASH_KV_MEMORY`) rather than trusting
 auto-sizing.
 
-That cap shipped at 2.5 GB, which was conservative: it now runs 3.2 GB with
-`KV=fp8`, for a 97,962-token pool at `MAX_LEN=88000` — 2.7x the context this
-profile used to offer, at the same decode rate (85.2 tok/s against bf16's 85.5,
-acceptance 3.26 against 3.19).
+That cap originally shipped at 2.5 GB, which was conservative: the later FP8
+sweep ran 3.2 GB for a 97,962-token pool at `MAX_LEN=88000` — 2.7x the context
+the profile first offered, at the same decode rate (85.2 tok/s against bf16's
+85.5, acceptance 3.26 against 3.19). The current wrappers use denser KVarN and
+the separately validated 2.4/2.8 GB pins below.
 
 **3.2 GB is the ceiling and the failure mode is a trap.** `--kv-cache-memory`
 takes memory vLLM would otherwise leave for compiled prefill on the 3060, so an
@@ -354,8 +358,8 @@ afterwards:
 To hold 88k the reversed split must give layers back to the 3060, and the
 advantage collapses to +2.1% decode while costing **23% of prefill** — 105 s to
 first token on an 80k prompt against 81 s. The two tested DFlash2
-configurations are different operating points; the shipped
-`start_qwen_dflash2.sh` favors the long-context 88k configuration.
+configurations are different operating points. The current DFlash2 wrappers
+use the later KVarN measurements below instead.
 
 **Reversing the pipeline is worth 7.7%.** `GPU_IDS=1,0 PP_LAYERS=20,44` gives
 each card the same number of target layers as before — and therefore the same
@@ -574,6 +578,26 @@ a clean boot and an initial health check are only setup. `SPEC_ATTN=0` also
 remains mandatory: the split-KV verify attention is bf16-KV only and KVarN
 brings its own dequant path.
 
+### KVarN on the batch profiles: one loss and one win
+
+KVarN does **not** help the eight-seat MTP batch profile. At the shipped
+`44,20` geometry with `MAX_SEQS=8`, it produced a **106,400-token pool**, well
+below FP8's 147,456-token worst-case floor. A 64,955-token retrieval passed and
+left `/health` at 200, but there is no context win to ship; MTP batch stays FP8.
+
+DFlash2 is different. With the solo profile's reversed `30,34` geometry,
+`MAX_SEQS=4`, a 2.4 GB pin and `MAX_LEN=147456`, KVarN produced a reproducible
+**151,503-token pool**. A **140,028-token** retrieval passed at 664 prompt
+tok/s and left `/health` at 200. Four distinct ~4k requests also completed
+without preemption; three were resident while one queued, peaking at 94.3% of
+the pool. This is `start_qwen_dflash2_batch.sh`.
+
+The pin is part of the profile, not spare capacity. At 2.8 GB the same
+four-seat server booted with a 183,370-token pool and passed one 150,054-token
+retrieval, then died at C4 when rank 1 needed another 24 MiB. The 2.8 GB pin is
+safe only in the one-seat `start_qwen_dflash2_solo.sh`, where a fresh
+190,050-token retrieval passed in 321.1 s and `/health` remained 200.
+
 ### DFlash2: KV dtype, pipeline order and where the layers go
 
 The shipped DFlash2 profile assumed BF16 KV. That assumption was never tested
@@ -688,13 +712,14 @@ float32/float16/bfloat16, so that floor cannot be lowered.
 
 ## llama-swap integration
 
-`heterogeneous/llama-swap.example.yaml` holds the three model entries (also
+`heterogeneous/llama-swap.example.yaml` holds the four model entries (also
 what runs on the origin host):
 
 - `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`),
   aliased from `vllm-speed/qwen3.8-27b`
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
-- `vllm-speed/qwen3.8-27b-dflash2` — DFlash2, 88k context
+- `vllm-speed/qwen3.8-27b-dflash2-batch` — DFlash2, 147k KVarN, four seats
+- `vllm-speed/qwen3.8-27b-dflash2-solo` — DFlash2, 200k KVarN, one seat
 
 Each entry launches through `/usr/bin/env PORT='${PORT}' NO_API_KEY=1` (the
 `env` indirection avoids a llama-swap multi-argument `cd` parsing bug), keeps
@@ -733,9 +758,9 @@ docker compose logs -f hetero
 | `SPEC` | `mtp` | `mtp`, `dflash2`, or `none` for a diagnostic baseline |
 | `DRAFT_TOKENS` | `3` | MTP depth; three is the FP8 long-context setting |
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
-| `DFLASH_KV_MEMORY` | `3200000000` | manual per-rank KV bytes for the DFlash2 profile; 3.4 GB boots and then OOMs mid-request |
+| `DFLASH_KV_MEMORY` | `2400000000` / `2800000000` | manual per-rank KV bytes for DFlash2 batch / solo; the solo pin OOMs at C4 |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `147456` / `88000` / `262144` | API context limit (batch / dflash2 / solo). Raising it is not free: see gotcha 40, the shipped values are the worst-draw ceilings |
+| `MAX_LEN` | `147456` / `262144` / `147456` / `200192` | API context limit (MTP batch / MTP solo / DFlash2 batch / DFlash2 solo) |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
 | `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
@@ -753,8 +778,11 @@ Examples:
 # Frozen general profile (what llama-swap runs)
 bash heterogeneous/start_qwen_batch.sh
 
-# Experimental 32k DFlash2 profile
-bash heterogeneous/start_qwen_dflash2.sh
+# Four-seat 147k DFlash2/KVarN profile
+bash heterogeneous/start_qwen_dflash2_batch.sh
+
+# Single-stream 200k DFlash2/KVarN profile
+bash heterogeneous/start_qwen_dflash2_solo.sh
 
 # Full native 262k context on ONE stream, at the batch profile's decode rate
 bash heterogeneous/start_qwen_solo.sh

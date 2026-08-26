@@ -21,15 +21,27 @@
     checkEndpoint: /health
     ttl: 900
     unloadTimeout: 60
-  "vllm-speed/qwen3.8-27b-dflash2":
-    name: "Qwen3.8 27B 88k (experimental DFlash2 profile)"
-    description: "DFlash2, 88k context, FP8 KV, 97,962-token pool, 85.8 tok/s; needs prepare/fetch_dflash2.py first."
+  "vllm-speed/qwen3.8-27b-dflash2-batch":
+    name: "Qwen3.8 27B DFlash2 batch (147k KVarN)"
+    description: "Four-seat DFlash2 with KVarN 4/2 KV: 147,456 context in a 151,503-token pool."
     aliases:
-      - "qwen3.8-27b-dflash2"
+      - "qwen3.8-27b-dflash2-batch"
     useModelName: "qwen3.8-27b"
     cmd: |
       /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
-      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_dflash2.sh
+      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_dflash2_batch.sh
+    checkEndpoint: /health
+    ttl: 900
+    unloadTimeout: 60
+  "vllm-speed/qwen3.8-27b-dflash2-solo":
+    name: "Qwen3.8 27B DFlash2 solo (200k KVarN)"
+    description: "Single-stream DFlash2 with KVarN 4/2 KV: 200,192 context in a 202,174-token pool."
+    aliases:
+      - "qwen3.8-27b-dflash2-solo"
+    useModelName: "qwen3.8-27b"
+    cmd: |
+      /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
+      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_dflash2_solo.sh
     checkEndpoint: /health
     ttl: 900
     unloadTimeout: 60
