@@ -38,6 +38,23 @@
 # batch size 1 (memory-bound), so this mode stays W4A16.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# flashinfer-cubin (the no-nvcc route, README Setup) publishes 0.6.13 against
+# flashinfer-python 0.6.16.post3; without this the import refuses the pair (#35).
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# A dead engine leaves its OffloadingConnector region behind as
+# /dev/shm/vllm_offload_*.mmap; the next boot then dies with OSError: Bad
+# address in shared_offload_region.py, and under restart policies that loops
+# (#33 found 70 ghosts after one host OOM). Unlink stale regions no live
+# process maps. VLLM_OFFLOAD_KEEP_SHM=1 skips this (several engines sharing
+# /dev/shm across namespaces, where the liveness scan cannot see the owner).
+if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    [ -e "$f" ] || continue
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[start_qwen] removing stale offload region $f"; rm -f "$f"; }
+  done
+fi
 REPO="$(dirname "$DIR")"
 cd "$REPO"
 
@@ -173,6 +190,38 @@ if [ "$SPEC" = "dflash2" ]; then
     # Measured cost of losing async scheduling at batch 1: under 1%.
     ASYNC_SCHED=${ASYNC_SCHED:-0}
   fi
+  # Tensor parallelism changes two calibrations below, both measured in #40
+  # (controlled 1-vs-2x3090 A/B on this harness):
+  #
+  # 1. The pinned KV_MEM is a 24-GiB-single-card constant and vLLM applies
+  #    --kv-cache-memory PER WORKER, so at TP=2 the pin strands ~8 GiB per card:
+  #    137,210 tokens of pool where GPU_UTIL sizing gets 302,223, with every
+  #    decode delta inside run-to-run spread. Under TP>1, unless the user pinned
+  #    one, size from GPU_UTIL instead. (The pin exists because the single-card
+  #    transient margin is sharp -- gotcha 39; TP halves the per-card footprint
+  #    and the same reporter's boxes boot clean unpinned.)
+  # 2. DFLASH_TOKENS>7 relies on the lookup lane filling the verify tail; at
+  #    TP=2 the one datapoint so far (#40) shows the tail accepting nothing and
+  #    the wider block costing -27% at C1. Until that is diagnosed, warn.
+  TP_SIZE=1
+  case " ${EXTRA_ARGS:-} " in *"-tensor-parallel-size"*|*" -tp "*)
+    TP_SIZE=$(printf %s " $EXTRA_ARGS" | sed -En "s/.* (--tensor-parallel-size[= ]|-tp )([0-9]+).*/\2/p")
+    TP_SIZE=${TP_SIZE:-1}
+  ;; esac
+  if [ "$TP_SIZE" -gt 1 ]; then
+    if [ -z "${KV_MEM+x}" ]; then
+      echo "[start_qwen] tensor-parallel-size $TP_SIZE: skipping the single-card KV_MEM" \
+           "pin, sizing the KV pool from GPU_UTIL=$GPU_UTIL (issue #40; export KV_MEM" \
+           "to pin it, KV_MEM= for this behavior explicitly)."
+      KV_MEM=
+    fi
+    if [ "$DRAFT_TOKENS" -gt 7 ]; then
+      echo "[start_qwen] WARNING: DFLASH_TOKENS=$DRAFT_TOKENS at TP=$TP_SIZE lost 27% at" \
+           "C1 in the one A/B so far (#40): the lookup-filled verify tail accepted" \
+           "nothing there. Until diagnosed, DFLASH_TOKENS=7 is the measured setting" \
+           "for TP>1." >&2
+    fi
+  fi
   # Memory: patches/hybrid-kv-groups-v2-cudagraph.patch stops the drafter's 5
   # sliding-window layers from padding the target's attention/GDN layers (78 instead of
   # 105 KB of pool per token), which is what makes 64k reachable here. The V2 runner's
@@ -280,14 +329,29 @@ if [ "$SPEC" = "dflash2" ]; then
   # against a single ~3.7k-token prompt (gotcha 39):
   #   MAX_SEQS=8   596 MiB  ok      MAX_SEQS=12  416 MiB  ok
   #   MAX_SEQS=10  456 MiB  ok      MAX_SEQS=16  356 MiB  DEAD, twice, same byte counts
-  # The prefill's transient set is ~356 MiB at --max-num-batched-tokens 2048, so 12
-  # clears it by ~60 MiB. Warning rather than a clamp: the number is a VRAM budget, and a
-  # card larger than 24 GiB will have room where this one does not. Lower KV_MEM if you
-  # genuinely need the seats.
+  # The transient set is elastic -- it squeezes to full speed with 8 MiB free -- but the
+  # first real batch's per-seat allocations are not, so the floor is sharp: through the
+  # KV_MEM door at 8 seats it sits between 396 (dead) and 436 MiB (fine) of free VRAM,
+  # same allocator fingerprint as the seat door (gotcha 39, both tables). Warning rather
+  # than a clamp: the number is a VRAM budget, and a card larger than 24 GiB will have
+  # room where this one does not. Lower KV_MEM if you genuinely need the seats.
   if [ "$CTX" = "huge" ] && [ "$MAX_SEQS" -gt 12 ]; then
     echo "[start_qwen] WARNING: MAX_SEQS=$MAX_SEQS at CTX=huge killed the engine on the" \
          "first prompt on a 24 GiB card (boots, serves /health, then OutOfMemoryError)." \
          "12 is the highest verified here. Lower MAX_SEQS or lower KV_MEM." >&2
+  fi
+  # The same room through the other door: a KV_MEM pinned above the profile default
+  # spends the same headroom. On Linux the shortfall is a loud OutOfMemoryError on the
+  # first real batch; on WSL2 it is SILENT -- WDDM backs the failed mapping with host
+  # memory and prefill quietly runs 5-10x slower with nothing in the logs (issue #25).
+  KV_STOCK=5583457484; [ "$CTX" = "huge" ] && KV_STOCK=5261334938
+  if [ -n "$KV_MEM" ] && [ "$KV_MEM" -gt "$KV_STOCK" ]; then
+    echo "[start_qwen] WARNING: KV_MEM=$KV_MEM is above the profile default $KV_STOCK." \
+         "The extra pool is taken from the headroom prefill and the first concurrent" \
+         "batch allocate from, and the floor is close: +150 MiB ran, +200 MiB killed" \
+         "the engine at CTX=huge MAX_SEQS=8 (gotcha 39 has the ladder). On Linux the" \
+         "miss is a loud OutOfMemoryError; on WSL2 it is SILENT: no error, prefill" \
+         "5-10x slower. Ladder 4k/16k TTFT against known-good rates before trusting it." >&2
   fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
 else
@@ -427,6 +491,21 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 # 2097152 px = 2048 image tokens.
 if [ "${VISION:-0}" = 1 ]; then
   VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
+  # VISION_OFFLOAD keeps the tower's weights in pinned host RAM and copies each module to
+  # the GPU for the duration of its own forward (patches/vision-tower-cpu-offload.patch).
+  # It defaults ON, because on 24 GB SPEC=dflash2 + VISION=1 does not boot without it:
+  # the tower is 0.85 GiB of the ~1.1 GiB transient margin the KV_MEM comment sizes, and
+  # graph capture then dies allocating the split-KV verify buffer --
+  #   torch.OutOfMemoryError: Tried to allocate 960.00 MiB ... 787.50 MiB is free
+  #     (spec_decode_attn.py:184, self.part_o)
+  # measured here, VISION=1 VISION_OFFLOAD=0 SPEC=dflash2, RTX 3090 at 250 W. With the
+  # offload the same config comes up with the full 69,758-token pool and reads images.
+  #
+  # It is close to free: isolated-tower measurement at PCIe 4.0 x16, one 8192-patch image,
+  # median of 10 forwards, 891.3 -> 9.0 MiB of resident weights and 1160.5 -> 308.2 MiB of
+  # peak allocation for 296 -> 333 ms of encode, output bit-exact either way. Set
+  # VISION_OFFLOAD=0 only on a card with room to spare, where 36 ms per image buys nothing.
+  [ "${VISION_OFFLOAD:-1}" = 1 ] && export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
 else
   VISION_ARGS="--language-model-only"
 fi

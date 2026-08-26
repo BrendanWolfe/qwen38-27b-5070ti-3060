@@ -31,7 +31,7 @@ MAX_LEN=${MAX_LEN:-147456}
 # against the four-slot 73.1/120.8/212.7). The only cost is CUDA graph memory,
 # 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the much larger pool swing
 # between starts comes from cold compiler scratch being charged during memory
-# profiling (gotcha 40), not this. Past eight the curve flattens but latency does not:
+# profiling (gotcha 43), not this. Past eight the curve flattens but latency does not:
 # C12 is +13% for 82 ms ITL, C16 is +28% for a ~3 s TTFT. See
 # heterogeneous/README.md.
 MAX_SEQS=${MAX_SEQS:-8}
@@ -45,7 +45,7 @@ MAX_SEQS=${MAX_SEQS:-8}
 # peak, so the pool from otherwise identical commands
 # ranges over 146,086 / 157,500 / 184,891 tokens, and the refusal threshold
 # over 148,096 / 159,744 / ~189,000. This frozen profile keeps the cold-safe
-# floor instead of adding retry behavior. See gotcha 40.
+# floor instead of adding retry behavior. See gotcha 43.
 GPU_UTIL=${GPU_UTIL:-0.91}
 API_SERVERS=${API_SERVERS:-1}
 KV=${KV:-fp8}

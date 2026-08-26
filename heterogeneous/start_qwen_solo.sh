@@ -25,7 +25,7 @@
 # inside vLLM's memory-profile window. The profiler charges its temporary
 # scratch as peak activation memory and can reject 262k even though the scratch
 # is gone before serving. The failed launch warms the exact artifact; a relaunch
-# then profiles the real steady-state footprint. Gotcha 40 records the evidence.
+# then profiles the real steady-state footprint. Gotcha 43 records the evidence.
 #
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +66,7 @@ for n in $(seq 1 "$ATTEMPTS"); do
   set -e
   if [ "$rc" -ne 0 ] && grep -q 'estimated maximum model length' "$LOG" \
      && [ "$n" -lt "$ATTEMPTS" ]; then
-    echo "start_qwen_solo: compile scratch was charged to KV sizing (attempt $n/$ATTEMPTS); relaunching with the warmed compile cache. See gotcha 40." >&2
+    echo "start_qwen_solo: compile scratch was charged to KV sizing (attempt $n/$ATTEMPTS); relaunching with the warmed compile cache. See gotcha 43." >&2
     continue
   fi
   exit "$rc"

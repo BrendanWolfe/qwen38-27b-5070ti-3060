@@ -144,7 +144,7 @@ bash heterogeneous/start_qwen_batch.sh
 - Expected: **74–75 tok/s** single-stream on realistic prompts (an earlier
   repeated-512-token measurement read 84; both are in
   [README.md](README.md)), and an FP8 KV pool of at least 147,456 tokens —
-  often more after the exact compile shape is warm (gotcha 40). Keep it in a `tmux` session or a systemd unit for long runs.
+  often more after the exact compile shape is warm (gotcha 43). Keep it in a `tmux` session or a systemd unit for long runs.
 
 ### DFlash2 batch profile (four scheduler seats)
 

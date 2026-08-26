@@ -331,7 +331,7 @@ documents the backport.
 This file previously claimed the patch also bought 9,131 tokens of pool
 (146,847 -> 155,978) by lowering the profiled peak activation. That is
 withdrawn. Both numbers are ordinary cold/warm profiling states described in
-gotcha 40, which span 146,086 to 188,769 tokens on this profile with no code
+gotcha 43, which span 146,086 to 188,769 tokens on this profile with no code
 change at all. The patch may or may not help the pool; one run each cannot
 tell, and nothing here has measured it properly.
 
@@ -575,7 +575,7 @@ later NCCL allocation. `--kv-cache-memory` skips profiling entirely, so the
 real per-rank free-VRAM headroom. Survival is gated by free VRAM after weights
 and the pin: this sweep found that rank 1 (the 5070 Ti) needs roughly 2.86 GiB
 or more spare, while rank 0 (the 3060) fails somewhere at or below 1.57 GiB
-(the lower threshold was not fully bracketed). See gotcha 41.
+(the lower threshold was not fully bracketed). See gotcha 44.
 
 Every candidate therefore needs a real prompt and a health check afterwards;
 a clean boot and an initial health check are only setup. `SPEC_ATTN=0` also
