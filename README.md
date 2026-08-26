@@ -10,14 +10,13 @@ most of the target on the faster card and transfers activations only at the
 stage boundary. The conversion of the upstream 3090 codebase into this
 two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
-## Four setups
+## Three setups
 
 | profile | launcher | KV | context | measured decode |
 |---|---|---|---|---|
 | **batch / general** | `heterogeneous/start_qwen_batch.sh` | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
 | **solo / long** | `heterogeneous/start_qwen_solo.sh` | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, one stream only |
 | **DFlash2 / long** | `heterogeneous/start_qwen_dflash2.sh` | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
-| **fastest DFlash2** | `heterogeneous/start_qwen_dflash2_fast.sh` | BF16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 
 The decode column is `bench/real_rep.sh` — 8 realistic 1,024-token prompts at
 concurrency 1, 3 reps — so the rows are comparable to each other. DFlash2's
@@ -25,7 +24,7 @@ speed is strongly workload-dependent (77–159 tok/s across the range); the
 earlier headline of 91.7 tok/s came from a different prompt mix and is not
 comparable to these.
 
-All four use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
+All three use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
 vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
 8.0943, GSM8K 96.5%, and a real 130,916-token prompt completes on the batch
 profile.
@@ -84,18 +83,6 @@ Honest tradeoffs versus the GGUF setup:
   run KVarN under MTP and pipeline parallelism at all, and at the same context
   it holds a larger pool than the int4 per-token-head mode it replaces
   (296,974 against 284,234).
-- **Reversing the pipeline is worth 7.7%** — putting the LM head, sampler and
-  drafter on the 5070 Ti instead of the 3060 costs ~3.15 GiB of KV on the
-  bigger card, so it only pays where context is cheap:
-  `heterogeneous/start_qwen_dflash2_fast.sh` is the profile that ships it.
-  Measured in [heterogeneous/README.md](heterogeneous/README.md).
-- **DFlash2 on FP8 KV and a reversed pipeline** —
-  `heterogeneous/start_qwen_dflash2_fast.sh`. The shipped DFlash2 profile's
-  assumption that it needs BF16 KV was untested and wrong: FP8 works, nearly
-  doubles the pool, and combined with putting the eager 1.2 GiB drafter on the
-  5070 Ti it is quicker as well. Also measured: below ~2 KB/token/layer the
-  Mamba state page binds the pool, so int8/int4 per-token-head KV buys no
-  context over FP8 while costing Triton-backend prefill speed.
 - **GDN metadata hoist** — `patches/vllm-pr52297-gdn-common-metadata.patch`,
   upstream PR #52297 backported. It does not make this pair faster (0.3%), but
   it lowers the profiled activation peak and buys 9,131 tokens of KV pool.

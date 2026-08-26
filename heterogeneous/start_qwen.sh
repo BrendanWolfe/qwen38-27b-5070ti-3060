@@ -41,7 +41,7 @@ ASYNC_SCHED=${ASYNC_SCHED:-1}
 SPEC=${SPEC:-mtp}
 DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 
-[ "$GPU_IDS" = "0,1" ] || echo "INFO: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES, not by physical device id. GPU_IDS=1,0 is the reversed pipeline used by start_qwen_dflash2_fast.sh (drafter and LM head on the 5070 Ti); anything else, verify the split is what you meant." >&2
+[ "$GPU_IDS" = "0,1" ] || echo "INFO: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES, not by physical device id; verify the split is what you meant." >&2
 [ "$PP_LAYERS" = "44,20" ] || echo "INFO: using custom pipeline layer partition $PP_LAYERS (must total 64)." >&2
 
 if [ "$KV" = "bf16" ]; then

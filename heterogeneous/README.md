@@ -6,14 +6,13 @@ consumer GPUs**: a 16 GiB RTX 5070 Ti (`sm120`, CUDA logical device 0) and a
 repository's fast model variant, and both speculative decoders (MTP and
 DFlash2).
 
-Four setups are supported:
+Three setups are supported:
 
 | profile | launcher | speculation | KV | context | measured decode |
 |---|---|---|---|---|---|
 | batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 147k (147,456-token pool floor) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
 | solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
 | DFlash2 / long | `start_qwen_dflash2.sh` | DFlash2 (7 drafts, 1 pass) | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
-| fastest DFlash2 | `start_qwen_dflash2_fast.sh` | DFlash2-7, reversed 24/40 | bf16 | 32k (34,539-token pool) | **95.2–98.8 tok/s**, 33.9 ms/step |
 
 `start_qwen.sh` is the shared, tunable launcher every profile wraps.
 
@@ -68,13 +67,11 @@ free, use it; nothing here depends on it.
   MTP/DFlash2/no-spec selection, process-group cleanup, no-auth mode.
 - `heterogeneous/start_qwen_batch.sh` — frozen MTP snapshot used by the
   general llama-swap model, so later experiments cannot change its behavior.
-- `heterogeneous/start_qwen_dflash2.sh` — 32k DFlash2 profile (BF16 KV,
+- `heterogeneous/start_qwen_dflash2.sh` — 88k DFlash2 profile (FP8 KV,
   manually sized cache, eager drafter; see below).
 - `heterogeneous/start_qwen_solo.sh` — 262k single-stream KVarN MTP profile
   (one scheduler slot, 4-bit keys / 2-bit values).
-- `heterogeneous/start_qwen_dflash2_fast.sh` — reversed-pipeline FP8 DFlash2;
-  strictly better than `start_qwen_dflash2.sh`.
-- `heterogeneous/llama-swap.example.yaml` — the four llama-swap model entries.
+- `heterogeneous/llama-swap.example.yaml` — the three llama-swap model entries.
 - `patches/vllm-pr46994-mtp-pp.patch` — MTP + pipeline parallelism (below).
 - `patches/vllm-pr52297-gdn-common-metadata.patch` — upstream PR #52297,
   backported. No measurable speed change here, but +6.2% KV pool; see
@@ -356,17 +353,17 @@ afterwards:
 
 To hold 88k the reversed split must give layers back to the 3060, and the
 advantage collapses to +2.1% decode while costing **23% of prefill** — 105 s to
-first token on an 80k prompt against 81 s. So the two DFlash2 profiles are
-complementary rather than redundant: `start_qwen_dflash2.sh` is the long-context
-machine at 88k, `start_qwen_dflash2_fast.sh` is 97 tok/s at 32k.
+first token on an 80k prompt against 81 s. The two tested DFlash2
+configurations are different operating points; the shipped
+`start_qwen_dflash2.sh` favors the long-context 88k configuration.
 
 **Reversing the pipeline is worth 7.7%.** `GPU_IDS=1,0 PP_LAYERS=20,44` gives
 each card the same number of target layers as before — and therefore the same
 11/5 split of full-attention layers and the same KV bytes per token — but
 makes the 5070 Ti the last rank, so the LM head, the sampler and the MTP
 drafter move onto it. 35.1 -> 32.4 ms/step, 73.6-75.5 -> 78.7-82.6 tok/s,
-tokens per step unchanged. `start_qwen_dflash2_fast.sh` is the profile that
-ships this arrangement.
+tokens per step unchanged. It can be reproduced manually with
+`GPU_IDS=1,0 PP_LAYERS=20,44`.
 
 It cannot become the general profile, because the last rank also carries the
 sampling and logits peak — 1.24 GiB against the first rank's 0.32 GiB — so the
@@ -660,7 +657,8 @@ quantize the KV cache at all, so it needs no quality argument. The cost is
 density — 4 KB per token per layer means a 34,539-token pool against FP8's
 45,085. Both cover a full 32k request; FP8 allows 1.38x concurrency there
 against BF16's 1.05x, which is the only reason left to choose it.
-`start_qwen_dflash2_fast.sh` therefore ships **BF16 at 24/40**.
+For manually tuned short-context runs, **BF16 at 24/40** is the fastest tested
+combination.
 
 **None of this transfers to the batch FP8 MTP profile.** The same piecewise
 downgrade fires there — it is FP8/FlashInfer too — but switching it to int8pth
@@ -690,15 +688,13 @@ float32/float16/bfloat16, so that floor cannot be lowered.
 
 ## llama-swap integration
 
-`heterogeneous/llama-swap.example.yaml` holds the two model entries (also
+`heterogeneous/llama-swap.example.yaml` holds the three model entries (also
 what runs on the origin host):
 
 - `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`),
   aliased from `vllm-speed/qwen3.8-27b`
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2, 88k context
-- `vllm-speed/qwen3.8-27b-dflash2-fast` — DFlash2 reversed pipeline, 32k at 97 tok/s
-  (`start_qwen_dflash2.sh`)
 
 Each entry launches through `/usr/bin/env PORT='${PORT}' NO_API_KEY=1` (the
 `env` indirection avoids a llama-swap multi-argument `cd` parsing bug), keeps
@@ -731,7 +727,7 @@ docker compose logs -f hetero
 
 | variable | default | purpose |
 |---|---:|---|
-| `GPU_IDS` | `0,1` | CUDA order; `1,0` reverses the pipeline (`start_qwen_dflash2_fast.sh`) |
+| `GPU_IDS` | `0,1` | CUDA order; `1,0` reverses the pipeline |
 | `PP_LAYERS` | `44,20` | target layers per pipeline rank; total must be 64 |
 | `MODEL` | fast variant if present | target model directory |
 | `SPEC` | `mtp` | `mtp`, `dflash2`, or `none` for a diagnostic baseline |

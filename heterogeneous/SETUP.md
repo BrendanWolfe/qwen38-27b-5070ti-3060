@@ -1,14 +1,13 @@
 # Setup guide — RTX 5070 Ti + RTX 3060 (from zero to serving)
 
 Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
-**12 GiB RTX 3060**. By the end you will have four working profiles:
+**12 GiB RTX 3060**. By the end you will have three working profiles:
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
 | `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 147k (147,456-token pool floor) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
 | `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
 | `start_qwen_dflash2.sh` | DFlash2, long context | **88k** (97,962-token pool) | FP8 | **~85 tok/s**, acceptance 3.26 |
-| `start_qwen_dflash2_fast.sh` | reversed-pipeline DFlash2 | 32k (34,539-token pool) | BF16 | **~97 tok/s**, 33.9 ms/step |
 
 Everything is driven by this fork (`BrendanWolfe/qwen38-27b-5070ti-3060`) of
 [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090) —
@@ -169,14 +168,13 @@ SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
 
 ## 8. (Optional) llama-swap front door
 
-Install llama-swap, then merge the four model entries from
+Install llama-swap, then merge the three model entries from
 `heterogeneous/llama-swap.example.yaml` into `~/.config/llama-swap/config.yaml`
 under `models:`. The entries:
 
 - `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`);
   keeps `vllm-speed/qwen3.8-27b` as an alias so existing clients keep working
 - `vllm-speed/qwen3.8-27b-dflash2` — DFlash2, 88k context (`start_qwen_dflash2.sh`)
-- `vllm-speed/qwen3.8-27b-dflash2-fast` — DFlash2 reversed pipeline, 32k at 97 tok/s
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 
 If you rename a launcher, remember that llama-swap holds absolute paths — grep
