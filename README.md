@@ -10,13 +10,13 @@ most of the target on the faster card and transfers activations only at the
 stage boundary. The conversion of the upstream 3090 codebase into this
 two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
-## Three setups
+## Supported setups
 
-| profile | launcher | KV | context | measured decode |
-|---|---|---|---|---|
-| **batch / general** | `heterogeneous/start_qwen_batch.sh` | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at 4 concurrent |
-| **solo / long** | `heterogeneous/start_qwen_solo.sh` | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, one stream only |
-| **DFlash2 / long** | `heterogeneous/start_qwen_dflash2.sh` | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
+| profile | launcher | speculation / slots | KV | context | measured decode |
+|---|---|---|---|---|---|
+| **batch / general** | `heterogeneous/start_qwen_batch.sh` | MTP-3 / 8 | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at C4 |
+| **solo / long** | `heterogeneous/start_qwen_solo.sh` | MTP-3 / 1 | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, C1 only |
+| **DFlash2 / long** | `heterogeneous/start_qwen_dflash2.sh` | DFlash2-7 / 4 | FP8 | **88k** (97,962-token pool) | **85.2 tok/s**, acceptance 3.26 |
 
 The decode column is `bench/real_rep.sh` — 8 realistic 1,024-token prompts at
 concurrency 1, 3 reps — so the rows are comparable to each other. DFlash2's
