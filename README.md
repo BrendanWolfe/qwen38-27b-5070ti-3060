@@ -327,6 +327,30 @@ answer, and 400 tokens of fluent Danish inventing a task the prompt never asked 
 sweeps all 128 residues and judges every answer on how much of the document came
 back, and `bench/verbatim.py` self-tests that rule against all three shapes.
 
+### 256k the stock way: int4 KV (`single-user/alternative.sh`, experimental)
+
+```bash
+bash single-user/alternative.sh      # TRITON_ATTN + --kv-cache-dtype int4_per_token_head
+```
+
+Where KVarN reaches 268k with its own kernels, vLLM's stock
+`int4_per_token_head` cache now combines with the DFlash2 drafter too:
+**314,915 tokens of pool at 256000 max-model-len** (1.23× concurrency) on one
+24 GB card, no `kvarn/install.sh`. Three boot blockers stood in the way — a
+padded-page view error under the hybrid block-promotion geometry, and a
+causal-only assert plus missing per-seq-causal plumbing in the int4 Triton
+kernel, which the drafter's 8-row draft block needs
+(`patches/int4-kv-per-token-head.patch`, contributed in
+[#42](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/42) by @lachhabw).
+
+The trade: the Triton attention backend plus the per-step int4 unpack cost
+about 20% of decode against the shipped config on short prompts (~86 vs ~104
+tok/s e2e on the same probe), and — unlike KVarN, which has GSM8K and
+100k-needle numbers above — **int4-KV quality at depth is unmeasured here**.
+Tool calling round-trips correctly and the lookup lane works; treat the rest
+as experimental until someone runs the quality harness on it, which is a
+contribution this README will gladly take.
+
 ### More than one GPU
 
 Everything here is written for one 24 GB card, and that is the only configuration
