@@ -194,6 +194,77 @@ launcher header records the full table; every row was checked by sending a
 prompt near `MAX_LEN` and confirming `/health` still answered afterwards. A
 clean boot proves only that the pool was sized.
 
+### What came from upstream on 2026-08-26, and what it means here
+
+Ten upstream commits, six new vLLM patches. All six apply cleanly on top of this
+fork's stack; what they are *worth* here splits three ways.
+
+**Two are inert on this hardware** and are carried only to keep `verify.sh` and
+upstream in step. `marlin-repack-staged-sm80.patch` works around an Xid-31 class
+on GA100 and defaults on for compute capability 8.0 *exactly* — this pair is
+sm120 and sm86, so the gate never opens (and the ~1.2 GiB resident staging
+buffer it would cost is not something either card here could spare).
+`offload-dflash-eagle-groups.patch` fixes the OffloadingConnector's CPU tier,
+which no profile here enables; gotcha 42 also records that the connector refuses
+`expandable_segments:True`, which is this fork's default on native Linux.
+
+**One is a straight bug fix that every profile here was exposed to.**
+`xgrammar-spec-terminated.patch`: a speculative verify window can accept tokens
+past the point where the xgrammar matcher terminates, and 0.27.1 treated that as
+a grammar rejection and killed the request. Every launcher here ships
+`--enable-auto-tool-choice --tool-call-parser qwen3_coder`, so valid tool calls
+could come back as HTTP errors. The wider the verify block the likelier it fires,
+which puts the DFlash2 profiles (7 draft tokens) ahead of the MTP ones (3).
+
+**Three are opportunities, all unmeasured on this pair.** They are wired to
+knobs and left at upstream's defaults rather than adopted on someone else's
+numbers:
+
+- `vision-tower-cpu-offload.patch` / `VISION_OFFLOAD=1` answers the objection
+  this README has always raised against `VISION=1`: the tower's 0.858 GiB lands
+  on rank 0, which is the rank that binds the KV pool. Offloaded, it does not.
+  The catch is fork-specific — upstream's cost (296 → 333 ms per image, ~891 MiB
+  at PCIe 4.0 x16) applies to the 44/20 profiles, where rank 0 is the 5070 Ti at
+  x16, but the DFlash2 profiles run `GPU_IDS=1,0` and rank 0 is then the 3060 on
+  **one PCIe lane**. Same copy, order half a second per image instead of 36 ms
+  by arithmetic. Worth it there only if 0.86 GiB of 3060 headroom is what you
+  are short of; gotcha 44 says rank 0 dies at or below ~1.57 GiB spare, so it
+  sometimes is.
+- `dflash2-ngram-chains.patch` / `CHAIN=1` skips the drafter's forward *and* its
+  graph replay while a request reproduces its own context. On a box whose step
+  time is weight bytes divided by bandwidth, skipped weight traffic is the
+  quantity that matters, and the drafter sits on the last pipeline rank — so a
+  chain step removes that rank's work rather than shrinking it. But the chain
+  requires a single request in the batch, so only the solo profiles can ever
+  enter it, and upstream's +7% copy-workload figure is one card with no PP.
+- `int4-kv-per-token-head.patch` unblocks `KV=int4pth` under `SPEC=dflash2`,
+  which previously died at engine init. `KV=int4pth` under MTP — the 262k
+  profile this README already measures — is untouched: the padded-page narrow
+  the patch adds only fires when a promoted drafter sliding-window layer pads
+  the pages, which does not happen without a drafter.
+
+**And one non-patch finding that matters more than any of them.** Upstream's
+`verify.sh` now tests `has_flashinfer()` instead of a bare `import flashinfer`,
+because vLLM only uses FlashInfer when `nvcc` is on `PATH` or `flashinfer-cubin`
+is installed. On this fork's own box neither was true, so `has_flashinfer()` is
+`False` and the DFlash2 candidate selector has been running on `torch.topk` at
+roughly half speed — meaning **every DFlash2 number below was measured on the
+fallback path**. The FlashInfer *attention* backend that `KV=fp8` selects is a
+separate code path and is unaffected, so the MTP rows stand. Fix is one line in
+[SETUP.md](SETUP.md) step 1.
+
+Upstream also rewrote its multi-GPU section around a controlled 1-vs-2×3090 A/B
+(+16–35% decode at TP=2, PCIe 4.0 x8, no NVLink) and stopped pinning `KV_MEM`
+under TP>1. None of it transfers: that result is two *matched* cards on eight
+lanes, and TP on this pair would put half of every layer on the 12 GiB card and
+cross a single lane several times per layer. The launchers now warn if
+`EXTRA_ARGS` asks for tensor parallelism. The one piece that does transfer is
+the semantics upstream had to work out to get there, confirmed in
+`vllm/v1/worker/gpu_worker.py`: `--kv-cache-memory` is applied **per worker**, so
+the DFlash2 wrappers' 2.4 / 2.8 GB pins are reserved on *each* card — which is
+what the `DFLASH_KV_MEMORY` table above was measuring all along, now said out
+loud.
+
 ## Measured results
 
 ### Batch MTP profile
@@ -778,12 +849,14 @@ docker compose logs -f hetero
 | `MAX_LEN` | `147456` / `262144` / `262144` / `147456` / `200192` | API context limit (MTP FP8 batch / MTP KVarN batch / MTP solo / DFlash2 batch / DFlash2 solo) |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
-| `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |
+| `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit. Since `patches/int4-kv-per-token-head.patch` `int4pth` also boots under `SPEC=dflash2`, which it previously could not — unmeasured on this pair |
 | `PREFIX_CACHE` | `1` | cache shared prefixes and resume hybrid recurrent state |
 | `ASYNC_SCHED` | `1` | asynchronous vLLM scheduler |
 | `INT8_ACT` | empty | W4A16 target; int8 activation GEMMs do not help batch size one |
 | `NO_API_KEY` | unset | `1` disables child auth for a trusted local proxy |
 | `VISION` | `0` | `1` keeps the vision tower instead of `--language-model-only`. Untested on this pair: `model.visual.*` loads on rank 0, the card that binds the KV pool, so its 0.858 GiB and the encoder's profiled peak both come out of the scarce side |
+| `VISION_OFFLOAD` | `1` | with `VISION=1`, keeps the tower's weights in pinned host RAM and copies each module to the GPU for its own forward (`patches/vision-tower-cpu-offload.patch`), so the 0.858 GiB stops landing on rank 0. `0` keeps it resident. Also untested here — and the per-image copy cost depends on which card is rank 0; see below |
+| `CHAIN` | `0` | with `SPEC=dflash2`, `1` enables drafter-free n-gram chains (`patches/dflash2-ngram-chains.patch`): while a request reproduces its own context, verify blocks come from history and the drafter's forward and graph replay are skipped. Needs one request in the batch, so only the solo profile can enter it. Unmeasured here |
 | `CUDAGRAPH_MODE` | unset | forces `PIECEWISE` / `FULL_AND_PIECEWISE` instead of vLLM's choice. Nothing here pins it — the runner fix makes that unnecessary — but A/B-ing the capture mode on one server needs the knob |
 | `CG` | `MAX_SEQS * (DRAFT_TOKENS + 1)`, capped at 64 | captured decode-graph size. Raise `VLLM_V2_CUDAGRAPH_MEM_MIB` with it if you override past the cap |
 

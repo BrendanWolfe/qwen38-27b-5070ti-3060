@@ -8,6 +8,27 @@
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# flashinfer-cubin (the no-nvcc route) publishes 0.6.13 against flashinfer-python
+# 0.6.16.post3; without this the import refuses the pair (upstream #35). Inert if
+# only one of the two is installed. NOTE for this pair: `has_flashinfer()` is what
+# the DFlash2 selector consults, and it wants nvcc on PATH *or* flashinfer-cubin --
+# a bare flashinfer-python passes `import flashinfer` and still leaves the selector
+# on torch.topk at about half speed, with one INFO line. verify.sh tests the real
+# predicate; heterogeneous/SETUP.md has the install line.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# No profile here enables the OffloadingConnector, so this normally finds nothing;
+# it is here for the EXTRA_ARGS path. A dead engine leaves its region behind as
+# /dev/shm/vllm_offload_*.mmap and the next boot dies with OSError: Bad address,
+# which under a restart policy loops (upstream #33 found 70 ghosts after one host
+# OOM). Unlink regions no live process maps. VLLM_OFFLOAD_KEEP_SHM=1 skips it.
+if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    [ -e "$f" ] || continue
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[start_qwen] removing stale offload region $f"; rm -f "$f"; }
+  done
+fi
 REPO="$(dirname "$DIR")"
 cd "$REPO"
 
@@ -44,6 +65,38 @@ DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 
 [ "$GPU_IDS" = "0,1" ] || echo "INFO: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES, not by physical device id; verify the split is what you meant." >&2
 [ "$PP_LAYERS" = "44,20" ] || echo "INFO: using custom pipeline layer partition $PP_LAYERS (must total 64)." >&2
+
+# Tensor parallelism through EXTRA_ARGS is a trap on THIS pair, which is why the
+# launcher pins --pipeline-parallel-size 2 rather than leaving the topology open.
+# Upstream now measures TP=2 as a clear win on two matched 3090s at PCIe 4.0 x8
+# (+16-35% decode, their #40); none of that carries here. TP splits every layer
+# evenly, so the 12 GiB 3060 would have to hold half of a model the 16 GiB card
+# is already the constraint on, and it communicates several times per layer over
+# a link that is ONE lane wide (the 3060 negotiates x1; see the hardware note in
+# heterogeneous/README.md). PP moves activations once per stage boundary and
+# permits the uneven 44/20 split, which is the whole reason this fork exists.
+case " ${EXTRA_ARGS:-} " in *"--tensor-parallel-size"*|*" -tp "*)
+  echo "WARNING: EXTRA_ARGS requests tensor parallelism, and this launcher also passes" \
+       "--pipeline-parallel-size 2. On this pair TP is the wrong axis: unequal cards" \
+       "and a PCIe x1 link to the 3060. Every measured profile here is PP-only." >&2
+;; esac
+
+# A --kv-cache-memory pin is applied PER WORKER (vllm/v1/worker/gpu_worker.py), so
+# under PP=2 the number below is reserved on EACH card -- 2.8 GB is 2.8 GB on the
+# 5070 Ti and 2.8 GB of the 3060's 12 GiB. That is deliberate on the DFlash2
+# profiles and it is also why their pins do not transfer between profiles: a pin
+# skips memory profiling entirely, so passing its sizing check says nothing about
+# whether either rank still has room for graph capture, prefill workspaces and
+# NCCL (gotcha 44 -- three configurations booted, reported a healthy pool, served
+# /health 200 and then died). 2,800,000,000 is the largest pin validated here,
+# and only at MAX_SEQS=1.
+KV_PIN=$(printf %s " ${EXTRA_ARGS:-} " | sed -En "s/.*--kv-cache-memory[= ]([0-9]+).*/\1/p")
+if [ -n "$KV_PIN" ] && [ "$KV_PIN" -gt 2800000000 ]; then
+  echo "WARNING: --kv-cache-memory=$KV_PIN is above the largest pin validated on this" \
+       "pair (2,800,000,000, at one seat). The pin is per PP rank, and the extra pool" \
+       "comes out of the headroom each rank needs AFTER sizing succeeds. Validate with" \
+       "a real long prompt followed by /health, not with a clean boot (gotcha 44)." >&2
+fi
 
 if [ "$KV" = "bf16" ]; then
   # The fastest KV mode for DFlash2, and not because it is the most accurate.
@@ -143,6 +196,24 @@ elif [ "$SPEC" = "dflash2" ]; then
   }
   DRAFT_TOKENS=${DFLASH_TOKENS:-7}
   export VLLM_DFLASH2_LOOKUP=${LOOKUP:-1}
+  # CHAIN=1 turns on drafter-free n-gram chains
+  # (patches/dflash2-ngram-chains.patch, upstream #38): while a request keeps
+  # reproducing its own context, whole verify blocks come from history alone and the
+  # drafter's forward AND its CUDA-graph replay are skipped until the first rejected
+  # token. Requires the lookup lane above; greedy requests only.
+  #
+  # OFF by default, as upstream ships it, and UNMEASURED on this pair. Two reasons it
+  # is worth trying here specifically, and one reason to be careful:
+  #   - this box is bandwidth-bound, and a skipped drafter forward is skipped weight
+  #     traffic, which is the quantity that sets step time here;
+  #   - the drafter sits on the LAST pipeline rank (gotcha 44), so on a chain step
+  #     that rank's work disappears rather than being merely cheaper.
+  #   - but the chain needs a single request in the batch, so it can only engage on
+  #     the solo profiles (MAX_SEQS=1) -- at MAX_SEQS=4 the batch DFlash2 profile
+  #     will simply never enter it. Upstream measured +7% on a copy workload and flat
+  #     elsewhere on ONE card with no PP; do not assume either number transfers.
+  # VLLM_DFLASH2_CHAIN_MINMATCH (8) and _CHAIN_LOG_SEC (30) tune entry and logging.
+  export VLLM_DFLASH2_CHAIN=${CHAIN:-0}
   # The split-KV verify attention is bf16-KV only. KVarN brings its own dequant
   # path, so the two cannot both be on -- upstream runs SPEC_ATTN=0 for exactly
   # this pair of settings (SPEC=dflash2 CTX=huge). Default it off here rather
@@ -243,6 +314,25 @@ fi
 # 2097152 px = 2048 image tokens.
 if [ "${VISION:-0}" = 1 ]; then
   VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
+  # VISION_OFFLOAD keeps the tower's weights in pinned host RAM and copies each module
+  # to the GPU for the duration of its own forward
+  # (patches/vision-tower-cpu-offload.patch). It answers the paragraph above directly:
+  # the 0.858 GiB that would otherwise land on the first pipeline rank -- the rank that
+  # binds the KV pool -- stops landing there, and 8.5 MiB of patch/pos embedding stays
+  # resident so visual.device still reports cuda. Default ON here for the same reason
+  # upstream defaults it on, and with more force: both cards are smaller than the 24 GiB
+  # it was measured on, and gotcha 44 puts rank 0's survival boundary at or below
+  # 1.57 GiB spare on the 3060.
+  #
+  # UNMEASURED on this pair, and the cost is NOT upstream's. They measured +36 ms per
+  # image moving ~891 MiB at PCIe 4.0 x16 (296 -> 333 ms per forward). Rank 0 here is
+  # the 5070 Ti at x16 under the default 44/20, so that number should roughly transfer
+  # -- but the DFlash2 profiles run GPU_IDS=1,0, which puts rank 0, and therefore the
+  # tower, on the 3060's ONE PCIe lane. At Gen4 x1 (~1.5-2 GB/s in practice) the same
+  # copy is order half a second per image rather than 36 ms. So: leave it on for the
+  # 44/20 profiles, and on the reversed DFlash2 profiles treat it as buying 0.86 GiB of
+  # 3060 headroom at a per-image price you should measure before serving images at rate.
+  [ "${VISION_OFFLOAD:-1}" = 1 ] && export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
 else
   VISION_ARGS="--language-model-only"
 fi

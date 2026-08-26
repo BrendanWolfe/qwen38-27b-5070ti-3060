@@ -10,6 +10,15 @@ most of the target on the faster card and transfers activations only at the
 stage boundary. The conversion of the upstream 3090 codebase into this
 two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 
+Last synced with upstream on **2026-08-26**. Six new vLLM patches came across
+and all six apply on this stack; two are inert on sm120/sm86, one
+(`xgrammar-spec-terminated.patch`) fixes tool calls that every profile here was
+exposed to, and three are behind knobs at upstream's defaults pending
+measurement. Upstream's new tensor-parallel results do **not** transfer to this
+pair. Full accounting, including a FlashInfer install gap that affects the
+DFlash2 numbers:
+[heterogeneous/README.md](heterogeneous/README.md#what-came-from-upstream-on-2026-08-26-and-what-it-means-here).
+
 ## Supported setups
 
 | profile | launcher | speculation / slots | KV | context | measured result |
@@ -70,9 +79,9 @@ Honest tradeoffs versus the GGUF setup:
 - **Quant quality.** 4-bit vs 5.5-bit is a real delta, measured small: IFBench
   78.3 vs 79.5 unquantized, GSM8K 96.5%, perplexity 8.0943. Speculation is
   lossless — the quant is the only lossy layer.
-- **Maintenance surface.** vLLM is pinned at 0.27.1 with 15 patches, two of
-  them bespoke to this PP setup; upgrades are projects. GGUF stacks update
-  routinely.
+- **Maintenance surface.** vLLM is pinned at 0.27.1 with 23 patches, four of
+  them carried by this fork (two bespoke to this PP setup); upgrades are
+  projects. GGUF stacks update routinely.
 - **Known workaround.** The DFlash2 drafter runs eagerly
   (`VLLM_DFLASH_CUDAGRAPH=0`) because its shared quantized LM-head GEMM crashes
   inside DFlash's private CUDA graph — some speed is left on the table.

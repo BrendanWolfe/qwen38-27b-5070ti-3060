@@ -42,7 +42,7 @@ for t in triton compressed_tensors; do $PY -c "import $t" 2>/dev/null && ok "pyt
 export FLASHINFER_DISABLE_VERSION_CHECK=1  # cubin publishes 0.6.13 vs python 0.6.16.post3; the launchers export this too
 $PY -c "from vllm.utils.flashinfer import has_flashinfer; assert has_flashinfer()" 2>/dev/null \
   && ok "flashinfer usable by vLLM (nvcc or flashinfer-cubin present)" \
-  || fail "flashinfer unusable: DFlash2 selector will run torch.topk at ~half speed. pip install flashinfer-python flashinfer-cubin==0.6.13 (#35)" 
+  || fail "flashinfer unusable: DFlash2 selector will run torch.topk at ~half speed. venv/bin/pip install flashinfer-cubin==0.6.13 (#35; heterogeneous/SETUP.md step 1). The MTP profiles and the FLASHINFER attention backend are unaffected." 
 
 echo "== vLLM patches (patches/*.patch)"
 # The reverse dry-run is exact, but two patches touching the same file (the DFlash2 pair)

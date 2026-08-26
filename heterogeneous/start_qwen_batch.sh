@@ -13,6 +13,23 @@
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# flashinfer-cubin (the no-nvcc route) publishes 0.6.13 against flashinfer-python
+# 0.6.16.post3; without this the import refuses the pair (upstream #35). This
+# profile is MTP, so it does not use the DFlash2 selector that `has_flashinfer()`
+# gates -- the export is here so the two launchers stay byte-comparable.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# Nothing here enables the OffloadingConnector; this is for the EXTRA_ARGS path.
+# A dead engine leaves /dev/shm/vllm_offload_*.mmap behind and the next boot dies
+# with OSError: Bad address, which under a restart policy loops (upstream #33).
+# VLLM_OFFLOAD_KEEP_SHM=1 skips it.
+if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
+  for f in /dev/shm/vllm_offload_*.mmap; do
+    [ -e "$f" ] || continue
+    grep -lqs "$f" /proc/[0-9]*/maps 2>/dev/null || { echo "[start_qwen] removing stale offload region $f"; rm -f "$f"; }
+  done
+fi
 REPO="$(dirname "$DIR")"
 cd "$REPO"
 
@@ -56,6 +73,24 @@ DRAFT_TOKENS=${DRAFT_TOKENS:-3}
 
 [ "$GPU_IDS" = "0,1" ] || echo "WARN: PP_LAYERS is ordered by CUDA_VISIBLE_DEVICES; verify the faster/larger card is first." >&2
 [ "$PP_LAYERS" = "44,20" ] || echo "INFO: using custom pipeline layer partition $PP_LAYERS (must total 64)." >&2
+
+# TP through EXTRA_ARGS is the wrong axis on this pair -- unequal cards and a PCIe
+# x1 link to the 3060 -- which is why the exec line below pins PP=2. Upstream's
+# +16-35% TP=2 result is two matched 3090s at x8 and does not carry here.
+case " ${EXTRA_ARGS:-} " in *"--tensor-parallel-size"*|*" -tp "*)
+  echo "WARNING: EXTRA_ARGS requests tensor parallelism; this profile is PP-only and" \
+       "every number in heterogeneous/README.md was measured that way." >&2
+;; esac
+
+# --kv-cache-memory is applied PER WORKER (vllm/v1/worker/gpu_worker.py), so a pin
+# here reserves the same bytes on BOTH cards, and it skips memory profiling: a pin
+# that passes its sizing check has not shown that either rank still has room for
+# graph capture, prefill workspaces and NCCL (gotcha 44). This profile ships no
+# pin; the DFlash2 wrappers do.
+case " ${EXTRA_ARGS:-} " in *"--kv-cache-memory"*)
+  echo "INFO: --kv-cache-memory is per PP rank and disables memory profiling. Validate" \
+       "with a real long prompt followed by /health, not with a clean boot (gotcha 44)." >&2
+;; esac
 
 if [ "$KV" = "bf16" ]; then
   KV_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
@@ -159,6 +194,14 @@ fi
 # 2097152 px = 2048 image tokens.
 if [ "${VISION:-0}" = 1 ]; then
   VISION_ARGS='--limit-mm-per-prompt {"image":{"count":1}} --mm-processor-kwargs {"size":{"shortest_edge":65536,"longest_edge":2097152}}'
+  # VISION_OFFLOAD keeps the tower's weights in pinned host RAM and copies each module
+  # to the GPU for its own forward (patches/vision-tower-cpu-offload.patch), so the
+  # 0.858 GiB stops landing on rank 0 -- which under this profile's 44/20 split is the
+  # 5070 Ti, the card that binds the KV pool. Default ON. Rank 0 is the x16 card here,
+  # so upstream's cost (~891 MiB at PCIe 4.0 x16, 296 -> 333 ms per image) should
+  # roughly transfer; it is still UNMEASURED on this pair. The reversed DFlash2
+  # profiles put rank 0 on the 3060's single lane -- see start_qwen.sh for that case.
+  [ "${VISION_OFFLOAD:-1}" = 1 ] && export VLLM_VISION_CPU_OFFLOAD_GB=${VLLM_VISION_CPU_OFFLOAD_GB:-1}
 else
   VISION_ARGS="--language-model-only"
 fi

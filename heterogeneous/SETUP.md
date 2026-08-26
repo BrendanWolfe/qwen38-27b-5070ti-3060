@@ -57,6 +57,29 @@ flashinfer-python 0.6.16.post3), `transformers==5.15.0`, `compressed-tensors==0.
 `huggingface_hub==1.27.0`, `hf_transfer`, `ninja`. **Do not install an unpinned
 `vllm`** — the patches are written against 0.27.1.
 
+If you will run either DFlash2 profile, add the cubin package:
+
+```bash
+venv/bin/pip install flashinfer-cubin==0.6.13
+```
+
+`flashinfer-python` alone is not enough. vLLM only *uses* FlashInfer where
+`has_flashinfer()` is true, and that predicate wants `nvcc` on `PATH` **or**
+`flashinfer-cubin` installed; with neither, the DFlash2 candidate selector falls
+back to `torch.topk` at roughly half speed and says so in exactly one INFO line
+(upstream #35). It is not hypothetical on a machine without the CUDA toolkit —
+this fork's own box had `flashinfer-python 0.6.16.post3`, no `nvcc`, and
+`has_flashinfer() == False`, so **the DFlash2 numbers in
+`heterogeneous/README.md` were measured on the torch.topk fallback** and should
+improve once the cubins are installed. `verify.sh` now tests the real predicate
+instead of a bare import. Do not fix the version mismatch by downgrading
+`flashinfer-python`: that drags torch back and breaks vLLM's C extension — the
+launchers export `FLASHINFER_DISABLE_VERSION_CHECK=1` instead.
+
+The FlashInfer *attention* backend that `KV=fp8` selects is a different code
+path and works without any of this, which is why the MTP profiles were never
+affected.
+
 ## 2. Download the base model (~19.5 GB)
 
 ```bash
@@ -96,12 +119,27 @@ for p in patches/*.patch; do
 done
 ```
 
-This loop applies all 15 patches in filename order — including the two this
+This loop applies all 23 patches in filename order — including the four this
 fork adds. Order matters, which is why the DFlash2 one is named
 `zz-dflash2-pipeline-parallel.patch`: it must be last because it edits files
 earlier patches also touch. `vllm-pr46994-mtp-pp.patch` (MTP + pipeline
 parallelism) uses the same conventional paths as the rest, so it applies in
 the loop too.
+
+Six of those arrived from upstream in the 2026-08-26 merge and all six apply
+cleanly on top of this fork's stack (verified by dry-run against a fully
+patched tree). Two of them do nothing on this hardware and are carried only so
+`verify.sh` and upstream stay in step: `marlin-repack-staged-sm80.patch`
+defaults on for compute capability **8.0 exactly** (this pair is sm120 and
+sm86), and `offload-dflash-eagle-groups.patch` fixes the OffloadingConnector,
+which no profile here enables. The other four are live:
+`xgrammar-spec-terminated.patch` (tool calls were returning HTTP errors for
+valid output when a verify window ran past the grammar's end — every profile
+here ships `--enable-auto-tool-choice`), `vision-tower-cpu-offload.patch`
+(`VISION_OFFLOAD`, below), `int4-kv-per-token-head.patch` (unblocks
+`KV=int4pth` under `SPEC=dflash2`; `KV=int4pth` under MTP is unchanged, since
+the padded-page branch it adds only fires when a promoted drafter layer pads
+the pages) and `dflash2-ngram-chains.patch` (`CHAIN=1`, off by default).
 
 ## 5. Verify the install
 
@@ -109,10 +147,12 @@ the loop too.
 bash verify.sh --no-server
 ```
 
-It checks Python/vLLM versions, that **every** patch is applied, and that the
-model was requantized (lm_head, embeddings, MTP module, draft head, fast
-variant, drafter). It should print `verify: OK (0 failures)` — KVarN is an
-optional warning you can ignore.
+It checks Python/vLLM versions, that **every** patch is applied, that
+FlashInfer is usable by vLLM rather than merely importable, and that the model
+was requantized (lm_head, embeddings, MTP module, draft head, fast variant,
+drafter). It should print `verify: OK (0 failures)` — KVarN is an optional
+warning you can ignore. A `flashinfer unusable` FAIL means step 1's
+`flashinfer-cubin` line was skipped; it only costs you the DFlash2 profiles.
 
 ## 6. API key (direct launches only)
 
