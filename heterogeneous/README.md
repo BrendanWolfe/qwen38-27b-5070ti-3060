@@ -6,11 +6,12 @@ consumer GPUs**: a 16 GiB RTX 5070 Ti (`sm120`, CUDA logical device 0) and a
 repository's fast model variant, and both speculative decoders (MTP and
 DFlash2).
 
-Four setups are supported:
+Five setups are supported:
 
 | profile | launcher | speculation | KV | context | measured result |
 |---|---|---|---|---|---|
 | batch / general | `start_qwen_batch.sh` | MTP-3, FP8 weights + FP8 KV | FP8 | 147k (147,456-token pool floor) | **73.6-75.5 tok/s** C1, **210 tok/s** aggregate at C4 |
+| batch / long | `start_qwen_kvarn_batch.sh` | MTP-3, eight scheduler seats | KVarN 4/2-bit | **262k** (289,641-token pool) | 240,035-token needle passed; **684 prefill tok/s** |
 | solo / long | `start_qwen_solo.sh` | MTP-3, one scheduler slot | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4-73.6 tok/s**, 34.8-35.4 ms/step, C1 only |
 | DFlash2 / batch | `start_qwen_dflash2_batch.sh` | DFlash2-7, four scheduler seats | KVarN 4/2-bit | **147k** (151,503-token pool) | C4 completes; three requests resident at 4k |
 | DFlash2 / solo | `start_qwen_dflash2_solo.sh` | DFlash2-7, one scheduler seat | KVarN 4/2-bit | **200k** (202,174-token pool) | **83.1–86.6 tok/s**, C1 only |
@@ -68,13 +69,15 @@ free, use it; nothing here depends on it.
   MTP/DFlash2/no-spec selection, process-group cleanup, no-auth mode.
 - `heterogeneous/start_qwen_batch.sh` — frozen MTP snapshot used by the
   general llama-swap model, so later experiments cannot change its behavior.
+- `heterogeneous/start_qwen_kvarn_batch.sh` — 262k, eight-seat KVarN MTP
+  profile with a bounded retry for cold compile-cache sizing.
 - `heterogeneous/start_qwen_dflash2_batch.sh` — 147k, four-seat DFlash2
   profile (KVarN KV, reversed pipeline, manually sized cache).
 - `heterogeneous/start_qwen_dflash2_solo.sh` — 200k, one-seat DFlash2
   profile (KVarN KV, reversed pipeline, manually sized cache).
 - `heterogeneous/start_qwen_solo.sh` — 262k single-stream KVarN MTP profile
   (one scheduler slot, 4-bit keys / 2-bit values).
-- `heterogeneous/llama-swap.example.yaml` — the four llama-swap model entries.
+- `heterogeneous/llama-swap.example.yaml` — the five llama-swap model entries.
 - `patches/vllm-pr46994-mtp-pp.patch` — MTP + pipeline parallelism (below).
 - `patches/vllm-pr52297-gdn-common-metadata.patch` — upstream PR #52297,
   backported. No measurable speed change here, but +6.2% KV pool; see
@@ -309,7 +312,8 @@ rank* is.
 The KV pool column is deliberately empty for the first two rows. The pool from
 an unchanged command varies by up to 38,805 tokens between launches (gotcha
 38), which is larger than any effect either change could have had, so a
-one-run-each comparison of pools measures the lottery and nothing else.
+one-run-each comparison of pools measures compile-cache/profile state and
+nothing else.
 
 **PR #52297 does not speed this machine up.** Upstream measured +61% output
 tok/s at concurrency 1 on Qwen3.6-35B-A3B + DFlash on an H200, from cutting
@@ -326,10 +330,10 @@ documents the backport.
 
 This file previously claimed the patch also bought 9,131 tokens of pool
 (146,847 -> 155,978) by lowering the profiled peak activation. That is
-withdrawn. Both numbers are ordinary draws from the startup-profiling lottery
-in gotcha 40, which spans 146,086 to 188,769 tokens on this profile with no
-code change at all. The patch may or may not help the pool; one run each
-cannot tell, and nothing here has measured it properly.
+withdrawn. Both numbers are ordinary cold/warm profiling states described in
+gotcha 40, which span 146,086 to 188,769 tokens on this profile with no code
+change at all. The patch may or may not help the pool; one run each cannot
+tell, and nothing here has measured it properly.
 
 ### Reversing the pipeline is a short-context win only
 
@@ -417,11 +421,11 @@ as the real concurrency bound on this architecture — is already handled by
 
 The measured cost of the higher ceiling is CUDA graph memory: 0.13 -> 0.14 GiB,
 about 1.3k tokens of pool. It is *not* responsible for the pool varying between
-starts. That swing is rank 1's profiled activation peak, which comes out at
-either 0.32 GiB or 1.24 GiB (the sampling/logits peak) depending on the draw,
-and it happens at four slots too — six repeated starts gave 184,130 tokens
+starts. That swing is compiler/autotuner scratch being included in rank 1's
+profiled peak (0.32 GiB warm versus 1.24 GiB cold), and it happens at four
+slots too — six repeated starts gave 184,130 tokens
 three times out of three at four slots and 146,847 / 157,500 / 184,130 / 184,130
-at eight. Every draw still clears the 140,000 the profile requires, but pin
+at eight. Every observed state still clears the 140,000 the profile requires, but pin
 `--kv-cache-memory` before comparing pools across configurations.
 
 Past eight the curve flattens and latency does not, which is why 8 and not 16
@@ -581,19 +585,20 @@ brings its own dequant path.
 ### KVarN on the batch profiles: longer context, with different constraints
 
 KVarN does help the eight-seat MTP batch profile. The original 70k-capped test
-reported a 106,400-token pool, but that was one high-activation startup draw
+reported a 106,400-token pool, but that was one cold compile-cache profile
 and was incorrectly treated as a capacity comparison. At the same shipped
-`44,20` geometry with `MAX_SEQS=8`, a low-activation draw booted at the full
+`44,20` geometry with `MAX_SEQS=8`, a warmed profile booted at the full
 **262,144-token** native context with a **289,641-token pool**. A
 **240,035-token** retrieval passed at 684 prompt tok/s and left `/health` at
 200. The eight-seat tail pool adds only 14 fp16 slots over the one-seat shape
 (40 instead of 26), so it does not erase KVarN's per-token density win.
 
-Startup remains the constraint: high-activation draws in this sweep refused
-245,760 and 262,144 with estimated limits of 124,928--135,168, while the next
-262,144 draw booted cleanly. The FP8 batch launcher therefore remains the
-reliable default until the KVarN batch route gets the solo launcher's bounded
-retry behavior; the result is not evidence that FP8 holds more context.
+The refusal was a cold compile-cache accounting artifact, not variable model
+activation memory. One failed profile spent 76.64 s compiling/autotuning and
+charged its temporary scratch to KV sizing; the next launch loaded the cached
+artifact, profiled in 1.24 s, and booted the 289,641-token pool. The dedicated
+`start_qwen_kvarn_batch.sh` retries only that sizing refusal after it has warmed
+the artifact. Other failures propagate immediately.
 
 DFlash2 is different. With the solo profile's reversed `30,34` geometry,
 `MAX_SEQS=4`, a 2.4 GB pin and `MAX_LEN=147456`, KVarN produced a reproducible
@@ -722,11 +727,11 @@ float32/float16/bfloat16, so that floor cannot be lowered.
 
 ## llama-swap integration
 
-`heterogeneous/llama-swap.example.yaml` holds the four model entries (also
+`heterogeneous/llama-swap.example.yaml` holds the five model entries (also
 what runs on the origin host):
 
-- `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`),
-  aliased from `vllm-speed/qwen3.8-27b`
+- `vllm-speed/qwen3.8-27b-batch` — general 147k MTP (`start_qwen_batch.sh`)
+- `vllm-speed/qwen3.8-27b-kvarn-batch` — 262k eight-seat KVarN (`start_qwen_kvarn_batch.sh`)
 - `vllm-speed/qwen3.8-27b-solo` — 262k single-stream KVarN (`start_qwen_solo.sh`)
 - `vllm-speed/qwen3.8-27b-dflash2-batch` — DFlash2, 147k KVarN, four seats
 - `vllm-speed/qwen3.8-27b-dflash2-solo` — DFlash2, 200k KVarN, one seat
@@ -770,7 +775,7 @@ docker compose logs -f hetero
 | `DFLASH_TOKENS` | `7` | DFlash2 verify block; the checkpoint was trained for 7 |
 | `DFLASH_KV_MEMORY` | `2400000000` / `2800000000` | manual per-rank KV bytes for DFlash2 batch / solo; the solo pin OOMs at C4 |
 | `VLLM_DFLASH_CUDAGRAPH` | `0` in the wrapper | `1` re-enables the drafter's private CUDA graph (crashes with the shared quantized LM head) |
-| `MAX_LEN` | `147456` / `262144` / `147456` / `200192` | API context limit (MTP batch / MTP solo / DFlash2 batch / DFlash2 solo) |
+| `MAX_LEN` | `147456` / `262144` / `262144` / `147456` / `200192` | API context limit (MTP FP8 batch / MTP KVarN batch / MTP solo / DFlash2 batch / DFlash2 solo) |
 | `MAX_SEQS` | `8` | scheduler slots and CUDA-graph sizing; 8 is +41% aggregate throughput at C8 over the old 4 and identical at C1-C4. `16` for batch work (up to 385 tok/s at C16, but ~3 s TTFT) |
 | `GPU_UTIL` | `0.91` / `0.915` | headroom for compiled prefill and speculative workspaces |
 | `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit |

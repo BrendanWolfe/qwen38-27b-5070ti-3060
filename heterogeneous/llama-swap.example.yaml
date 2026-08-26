@@ -4,16 +4,13 @@
 # and records per-request metrics (the launchers enable vLLM's usage and
 # per-request-metrics flags). NO_API_KEY=1 disables vLLM's key auth because
 # llama-swap is the trusted front door; keep llama-swap itself off untrusted
-# networks. The unprefixed IDs can be kept as aliases for older clients.
+# networks. Model IDs are canonical; this example intentionally defines no
+# compatibility aliases.
 #
 # models:
   "vllm-speed/qwen3.8-27b-batch":
     name: "Qwen3.8 27B batch (vLLM, RTX 5070 Ti + RTX 3060)"
     description: "General 147k FP8-KV/MTP batch profile (8 slots); frozen launcher snapshot."
-    aliases:
-      - "vllm-speed/qwen3.8-27b"
-      - "qwen3.8-27b"
-      - "qwen-local"
     useModelName: "qwen3.8-27b"
     cmd: |
       /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
@@ -21,11 +18,19 @@
     checkEndpoint: /health
     ttl: 900
     unloadTimeout: 60
+  "vllm-speed/qwen3.8-27b-kvarn-batch":
+    name: "Qwen3.8 27B KVarN batch (262k)"
+    description: "Eight-seat MTP-3 with KVarN 4/2 KV: full 262,144 context in a measured 289,641-token pool."
+    useModelName: "qwen3.8-27b"
+    cmd: |
+      /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
+      /mnt/ssd1/qwen38-27b-rtx3090/heterogeneous/start_qwen_kvarn_batch.sh
+    checkEndpoint: /health
+    ttl: 900
+    unloadTimeout: 60
   "vllm-speed/qwen3.8-27b-dflash2-batch":
     name: "Qwen3.8 27B DFlash2 batch (147k KVarN)"
     description: "Four-seat DFlash2 with KVarN 4/2 KV: 147,456 context in a 151,503-token pool."
-    aliases:
-      - "qwen3.8-27b-dflash2-batch"
     useModelName: "qwen3.8-27b"
     cmd: |
       /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
@@ -36,8 +41,6 @@
   "vllm-speed/qwen3.8-27b-dflash2-solo":
     name: "Qwen3.8 27B DFlash2 solo (200k KVarN)"
     description: "Single-stream DFlash2 with KVarN 4/2 KV: 200,192 context in a 202,174-token pool."
-    aliases:
-      - "qwen3.8-27b-dflash2-solo"
     useModelName: "qwen3.8-27b"
     cmd: |
       /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \
@@ -48,8 +51,6 @@
   "vllm-speed/qwen3.8-27b-solo":
     name: "Qwen3.8 27B 262k solo (single stream, full native context)"
     description: "KVarN 4-bit-key/2-bit-value KV at ONE scheduler slot: 296,974-token pool at the full 262,144 context, at the batch profile's decode rate. Serves one request at a time."
-    aliases:
-      - "qwen3.8-27b-solo"
     useModelName: "qwen3.8-27b"
     cmd: |
       /usr/bin/env PORT='${PORT}' NO_API_KEY=1 \

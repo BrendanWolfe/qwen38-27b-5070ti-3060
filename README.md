@@ -15,7 +15,7 @@ two-GPU setup was produced with the assistance of **gpt-5.6-sol**.
 | profile | launcher | speculation / slots | KV | context | measured result |
 |---|---|---|---|---|---|
 | **batch / general** | `heterogeneous/start_qwen_batch.sh` | MTP-3 / 8 | FP8 | 147k (147,456-token pool floor) | **73.6–75.5 tok/s** C1; **210 tok/s** at C4 |
-| **batch / long (experimental)** | `KV=kvarn MAX_LEN=262144 heterogeneous/start_qwen.sh` | MTP-3 / 8 | KVarN 4/2-bit | **262k** (289,641-token pool) | 240,035-token needle passed; **684 prefill tok/s** |
+| **batch / long** | `heterogeneous/start_qwen_kvarn_batch.sh` | MTP-3 / 8 | KVarN 4/2-bit | **262k** (289,641-token pool) | 240,035-token needle passed; **684 prefill tok/s** |
 | **solo / long** | `heterogeneous/start_qwen_solo.sh` | MTP-3 / 1 | KVarN 4/2-bit | **262k** (296,974-token pool) | **72.4–73.6 tok/s**, C1 only |
 | **DFlash2 / batch** | `heterogeneous/start_qwen_dflash2_batch.sh` | DFlash2-7 / 4 | KVarN 4/2-bit | **147k** (151,503-token pool) | four requests complete; three resident at 4k |
 | **DFlash2 / solo** | `heterogeneous/start_qwen_dflash2_solo.sh` | DFlash2-7 / 1 | KVarN 4/2-bit | **200k** (202,174-token pool) | **83.1–86.6 tok/s**, C1 only |
@@ -26,11 +26,11 @@ four-request residency test. DFlash2's speed is strongly workload-dependent
 (77–159 tok/s across the range); the earlier headline of 91.7 tok/s came from
 a different prompt mix and is not comparable to these.
 
-The experimental MTP/KVarN batch row needs a low-activation startup-profile
-draw: high draws in the same sweep refused 262k with estimated limits of
-125–135k, while the successful draw served 240k and remained healthy. The FP8
-batch launcher remains the reliable default until this route has bounded
-startup retries.
+The MTP/KVarN batch launcher retries a specific cold-cache sizing failure. A
+missing TorchInductor artifact can allocate compiler scratch during vLLM's
+memory profile; vLLM charges that temporary as peak activation memory and may
+reject 262k. The failed attempt warms the artifact, and the bounded relaunch
+profiles the steady-state footprint. Other startup failures are not retried.
 
 All profiles use the repository's fast variant (int4-GPTQ lm_head + MTP module) and
 vLLM 0.27.1's V2 model runner. Quality is unchanged by speculation: perplexity
@@ -135,8 +135,9 @@ Honest tradeoffs versus the GGUF setup:
   crashes inside DFlash's private CUDA graph, so the drafter runs eagerly while
   the target keeps compilation and graphs).
 - **Launchers** — `heterogeneous/start_qwen.sh` (shared, tunable),
-  `start_qwen_batch.sh` (frozen MTP snapshot), `start_qwen_solo.sh` (262k
-  single-stream KVarN), `start_qwen_dflash2_batch.sh` (147k KVarN), and
+  `start_qwen_batch.sh` (frozen MTP snapshot), `start_qwen_kvarn_batch.sh`
+  (262k eight-seat KVarN), `start_qwen_solo.sh` (262k single-stream KVarN),
+  `start_qwen_dflash2_batch.sh` (147k KVarN), and
   `start_qwen_dflash2_solo.sh` (200k KVarN). They encode
   the host/toolchain fixes this pair needed: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
   `TORCH_CUDA_ARCH_LIST="8.6;12.0"`, GCC 15 for CUDA 13.3's JIT, unsetting

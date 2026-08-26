@@ -446,12 +446,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     residency were already useless (they queue, then preempt). Past 12 at `CTX=huge`
     they stop being useless and become fatal.
 
-40. **The startup memory profile is a per-rank lottery, so the KV pool from an
-    unchanged command is not reproducible — and neither is whether the server
-    starts at all.** Each pipeline rank independently lands on a low (~0.32 GiB)
-    or high (~1.2 GiB) profiled activation peak, and the pool follows. Eight
-    launches of the batch profile, identical command, GPUs verified idle before
-    each:
+40. **Cold compiler scratch can be miscounted as model activation memory.**
+    vLLM resets PyTorch's peak counter and compiles/runs the dummy forward
+    inside the same memory-profiling window. If the exact TorchInductor/Triton
+    artifact is missing, compilation and autotuning allocate temporary GPU
+    scratch. The profiler calls the resulting high-water mark "peak
+    activation," subtracts it from the KV budget, and may reject a context that
+    fits after compilation. Each PP rank has its own artifacts, so the apparent
+    peak and pool can differ per rank. Earlier launches recorded:
 
     | PP0 peak | PP1 peak | pool |
     |---|---|---|
@@ -459,32 +461,30 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     | 0.32 | 1.24 | 157,500 / 158,838 |
     | 0.32 | 0.32 | 184,891 / 186,462 |
 
-    A 38,805-token spread. The same lottery decides the refusal threshold: at
-    `MAX_LEN=180224` one launch died with "estimated maximum model length is
-    159744" and the next two booted with a 188,769-token pool. Observed
-    estimates are 148,096, 159,744 and ~189,000 — at least three states, not
-    two.
+    That is a 38,805-token spread from profiling/cache state, not changing
+    model activations. The direct KVarN batch A/B made the cause visible: the
+    failed profile spent **76.64 s** compiling and refused 262k; the next launch
+    loaded the cached artifact, profiled in **1.24 s**, allocated a
+    **289,641-token** pool, and passed a 240,035-token request.
 
     Consequences, all of which this repo got wrong at least once:
 
-    - **Ship the worst draw, not the best.** A `MAX_LEN` between the worst and
-      best threshold starts most of the time and then, one restart later, does
-      not. `start_qwen_batch.sh` ships 147,456 because 148,096 is the worst
-      estimate seen across ~20 boots.
+    - **Warm the exact shape or retry only the sizing refusal.**
+      `start_qwen_kvarn_batch.sh` and `start_qwen_solo.sh` relaunch only after
+      the `estimated maximum model length` error; the failed attempt has warmed
+      the artifact. Real OOMs, bad flags and normal termination are not retried.
     - **Never attribute a pool change to a code change from one run each.** This
       file used to credit PR #52297 with growing the pool from 146,847 to
       155,978 tokens by lowering the profiled peak. Both numbers are ordinary
-      draws from the range above; the patch is a CPU-side metadata hoist and its
+      cache/profile states from the range above; the patch is a CPU-side metadata hoist and its
       pool effect is unmeasured. It is still worth keeping, just not for that.
-    - **Repeated agreement is not determinism.** Three consecutive launches at
-      one setting returning bit-identical pools was read here as proof the
-      effect was deterministic and driven by `MAX_LEN`. It is three draws that
-      landed on the same branch; a fourth at a nearby setting drew differently.
-      Vary the thing you are testing *and* repeat it, or you learn nothing.
+    - **Compare warmed shapes, not one cold launch per configuration.** Changing
+      `MAX_LEN`, slots, graph sizes or pipeline placement can select another
+      compile artifact. A one-run comparison can therefore measure compiler
+      scratch rather than the change under test.
 
-    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not the cause —
-    clearing it gave three low draws in a row and then a high one. Do not clear
-    it hoping to pin the branch; gotcha 3 still applies.
+    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not the cause. Do not
+    clear it to alter the profile; gotcha 3 still applies.
 
 41. **A pinned KV pool passing its sizing check does not predict whether the
     server will survive a request.** `--kv-cache-memory` skips memory profiling

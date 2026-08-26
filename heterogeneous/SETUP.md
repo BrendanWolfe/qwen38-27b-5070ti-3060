@@ -1,11 +1,12 @@
 # Setup guide — RTX 5070 Ti + RTX 3060 (from zero to serving)
 
 Step-by-step for someone with the same pair: a **16 GiB RTX 5070 Ti** and a
-**12 GiB RTX 3060**. By the end you will have four working profiles:
+**12 GiB RTX 3060**. By the end you will have five working profiles:
 
 | profile | what it is | context | KV | single-stream decode |
 |---|---|---|---|---|
 | `start_qwen_batch.sh` | general-purpose, MTP-3, 8 slots | 147k (147,456-token pool floor) | FP8 | **~74 tok/s** (210 tok/s at 4 concurrent) |
+| `start_qwen_kvarn_batch.sh` | long-context MTP-3, 8 slots | **262k** (289,641-token pool) | KVarN 4/2-bit | 240,035-token needle passed; **684 prefill tok/s** |
 | `start_qwen_solo.sh` | full native context, one stream | **262k** (296,974-token pool) | KVarN 4/2-bit | **~73 tok/s** |
 | `start_qwen_dflash2_batch.sh` | DFlash2, 4 scheduler seats | **147k** (151,503-token pool) | KVarN 4/2-bit | C4 completes; 3 resident at 4k |
 | `start_qwen_dflash2_solo.sh` | DFlash2, one stream | **200k** (202,174-token pool) | KVarN 4/2-bit | **~83–87 tok/s** |
@@ -143,7 +144,7 @@ bash heterogeneous/start_qwen_batch.sh
 - Expected: **74–75 tok/s** single-stream on realistic prompts (an earlier
   repeated-512-token measurement read 84; both are in
   [README.md](README.md)), and an FP8 KV pool of at least 147,456 tokens —
-  often more, because the startup profile is a lottery (gotcha 40). Keep it in a `tmux` session or a systemd unit for long runs.
+  often more after the exact compile shape is warm (gotcha 40). Keep it in a `tmux` session or a systemd unit for long runs.
 
 ### DFlash2 batch profile (four scheduler seats)
 

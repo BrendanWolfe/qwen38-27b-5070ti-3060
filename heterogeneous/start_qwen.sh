@@ -25,8 +25,9 @@ MAX_LEN=${MAX_LEN:-140000}
 # (213.9 -> 301.0 tok/s) and changes nothing at one to four (73.0/115.7/213.9
 # against the four-slot 73.1/120.8/212.7). The only cost is CUDA graph memory,
 # 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the ~1 GiB pool swing between
-# identical starts is rank 1's profiled activation peak (0.32 or 1.24 GiB) and
-# is unrelated to this. Past eight the curve flattens but latency does not:
+# otherwise identical starts is cold compiler scratch being charged to rank
+# 1's memory profile (0.32 GiB warm or 1.24 GiB cold), not this. Past eight the
+# curve flattens but latency does not:
 # C12 is +13% for 82 ms ITL, C16 is +28% for a ~3 s TTFT. See
 # heterogeneous/README.md.
 MAX_SEQS=${MAX_SEQS:-8}
