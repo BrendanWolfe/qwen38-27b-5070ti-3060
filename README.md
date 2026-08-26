@@ -92,6 +92,15 @@ its attention KV and its recurrent state. One request at a time, greedy, RTX
 | reproducing a 25k-token document | n/a* | 260 | **382** |
 | request slots / context | 8 / 64k | 8 / 64k | 4 / 56k |
 
+`VLLM_DFLASH2_CHAIN=1` adds drafter-free n-gram chains on top
+([#38](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/38), ported from
+@Dmtrii-tesla's fork with permission): while a request keeps reproducing its
+context, whole verify blocks come from history alone and the drafter's forward
+and graph replay are skipped until the first rejected token — +7% on the copy
+cell here (256.9 → 276 tok/s at `DFLASH_TOKENS=7`), flat on prose, greedy
+requests only by default (`patches/dflash2-ngram-chains.patch` explains why
+sampling keeps the drafter). Off by default.
+
 <sub>\* drafting from the context only exists in `SPEC=dflash2`. The two right
 columns are one server session, where run-to-run greedy divergence is ±3-5%;
 reproduce them with `venv/bin/python bench/labd_bench.py <tag> --ctx 20000`.</sub>
@@ -412,8 +421,17 @@ code), 1,024-token answers, model-default sampling, thinking off:
 | C1 | 71.00 tok/s | 45.5 | 111.1 | **121.8** |
 | C2 | 90.66 tok/s | 86.3 | 191.8 | **195.5** |
 | C4 | 100.28 tok/s | 168.3 | 268.5 | **278.9** |
-| C8 | 165.33 tok/s | 324.9 | **407.3** | 389.9 |
+| C8 | 165.33 tok/s | 324.9 | **407.3** | 389.9† |
 | C64 (128 in / 512 out) | not supported | **~1,035** | — | — |
+
+† measured before `PREFIX_CACHE=1` became the single-user default. With
+prefix caching on, cached prefixes (and, under `--mamba-cache-mode align`,
+their recurrent-state pages) stay resident through the cohort ladder, so the
+DFlash2 residency ceiling bites earlier and this cell reads ~324 tok/s with a
+2-3 s TTFT on the current stack — independently measured at 321.8 in
+[#40](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/40), which is what
+prompted the re-measurement. C1–C4 read the same or slightly better than the
+table. One card, many concurrent users: `SPEC=mtp` remains the right mode.
 
 Decode rate, C × 1000 / mean TPOT. All four of our columns were re-measured together
 on the current stack with `bench/run_benchmarks.sh`, keeping the second run after each
