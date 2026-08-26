@@ -237,6 +237,27 @@ numbers:
   chain step removes that rank's work rather than shrinking it. But the chain
   requires a single request in the batch, so only the solo profiles can ever
   enter it, and upstream's +7% copy-workload figure is one card with no PP.
+
+  **This patch does not work here as shipped, and the failure is not gated by
+  the knob.** Its `propose()` override on `DFlash2Speculator` copies stock
+  0.27.1's signature, which has no `intermediate_tensors` — the parameter
+  `zz-dflash2-pipeline-parallel.patch` adds to the base method because under PP
+  the speculator runs on the last rank and needs the previous stage's hidden
+  states. The override shadows the base, the model runner passes the argument by
+  keyword every step, and both DFlash2 profiles die in warmup with
+  `TypeError: DFlash2Speculator.propose() got an unexpected keyword argument
+  'intermediate_tensors'` — with `CHAIN=0` as readily as `CHAIN=1`, since the
+  mismatch is in the signature rather than the chain logic. The pool sizes
+  correctly at 202,174 tokens and both ranks capture their graphs first, so it
+  looks like a healthy boot right up to the exception.
+  `patches/zzzz-dflash2-chain-pp-propose.patch` accepts and forwards the
+  parameter; the chain fast path does not need it, because `_chain_generate`
+  never runs the draft model. With it, `start_qwen_dflash2_solo.sh` boots to its
+  documented 202,174-token pool and benches at 84.4 tok/s.
+
+  This is the argument for applying upstream patches and then *booting every
+  profile* rather than trusting a clean `patch` run: all six applied without a
+  single fuzzy hunk.
 - `int4-kv-per-token-head.patch` unblocks `KV=int4pth` under `SPEC=dflash2`,
   which previously died at engine init. `KV=int4pth` under MTP — the 262k
   profile this README already measures — is untouched: the padded-page narrow
@@ -247,11 +268,23 @@ numbers:
 `verify.sh` now tests `has_flashinfer()` instead of a bare `import flashinfer`,
 because vLLM only uses FlashInfer when `nvcc` is on `PATH` or `flashinfer-cubin`
 is installed. On this fork's own box neither was true, so `has_flashinfer()` is
-`False` and the DFlash2 candidate selector has been running on `torch.topk` at
-roughly half speed — meaning **every DFlash2 number below was measured on the
-fallback path**. The FlashInfer *attention* backend that `KV=fp8` selects is a
-separate code path and is unaffected, so the MTP rows stand. Fix is one line in
-[SETUP.md](SETUP.md) step 1.
+`False` and the DFlash2 candidate selector was running on `torch.topk` — so
+every DFlash2 number below predating this was measured on the fallback path.
+The FlashInfer *attention* backend that `KV=fp8` selects is a separate code path
+and is unaffected, so the MTP rows stand.
+
+Installed (`flashinfer-cubin==0.6.13`, now pinned in `docker/requirements.txt`)
+and re-measured, and the answer is **it changes nothing on realistic prose**.
+`bench/real_rep.sh`, DFlash2 solo profile, 3 reps greedy: 84.44 / 84.49 / 84.44
+tok/s e2e, 37.9 ms/step, 3.20 tokens/step — inside the 83.1–86.6 band this
+README already reports, and the step time is identical to three decimal places
+across reps. That is the expected shape on this box rather than a
+disappointment: the selector's top-k is a small eager kernel, and step time here
+is weight bytes divided by bandwidth. It should still be worth something on the
+reproduction/copy workload, where the drafter proposes far more per step; that
+cell is **not yet re-measured** (`bench/labd_bench.py` hard-codes
+`~/qwen-serving/api_key.txt` and does not run from this checkout). Keep the
+package: it is free, and it removes a silent half-speed path.
 
 Upstream also rewrote its multi-GPU section around a controlled 1-vs-2×3090 A/B
 (+16–35% decode at TP=2, PCIe 4.0 x8, no NVLink) and stopped pinning `KV_MEM`

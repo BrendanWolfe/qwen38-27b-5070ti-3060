@@ -8,6 +8,15 @@ compressed-tensors==0.17.0
 huggingface_hub==1.27.0
 hf_transfer==0.1.9
 ninja==1.13.0
+# flashinfer-python comes in with vllm==0.27.1, but vLLM only USES FlashInfer
+# where has_flashinfer() is true, and that wants nvcc on PATH or this package.
+# Without it the DFlash2 candidate selector silently runs torch.topk at about
+# half speed, announcing it in one INFO line (#35) -- which is exactly what
+# happened on the reference box, so every DFlash2 number predating 2026-08-26
+# was measured on the fallback. cubin publishes up to 0.6.13 against
+# flashinfer-python 0.6.16.post3; the launchers export
+# FLASHINFER_DISABLE_VERSION_CHECK=1 rather than downgrading either half.
+flashinfer-cubin==0.6.13
 # bench/run_benchmarks.sh calls `vllm bench serve`, whose dataset loader imports
 # pandas through a PlaceholderModule -- so without this every cohort dies on
 # "Please install vllm[bench] for bench support" and the fix is not obvious from

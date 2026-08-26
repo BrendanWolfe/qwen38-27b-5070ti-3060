@@ -63,16 +63,22 @@ If you will run either DFlash2 profile, add the cubin package:
 venv/bin/pip install flashinfer-cubin==0.6.13
 ```
 
+(This is now pinned in `docker/requirements.txt`, so a fresh install of step 1
+already has it.)
+
 `flashinfer-python` alone is not enough. vLLM only *uses* FlashInfer where
 `has_flashinfer()` is true, and that predicate wants `nvcc` on `PATH` **or**
 `flashinfer-cubin` installed; with neither, the DFlash2 candidate selector falls
 back to `torch.topk` at roughly half speed and says so in exactly one INFO line
 (upstream #35). It is not hypothetical on a machine without the CUDA toolkit —
 this fork's own box had `flashinfer-python 0.6.16.post3`, no `nvcc`, and
-`has_flashinfer() == False`, so **the DFlash2 numbers in
-`heterogeneous/README.md` were measured on the torch.topk fallback** and should
-improve once the cubins are installed. `verify.sh` now tests the real predicate
-instead of a bare import. Do not fix the version mismatch by downgrading
+`has_flashinfer() == False`, so the DFlash2 numbers in
+`heterogeneous/README.md` were measured on the torch.topk fallback. Re-measured
+after installing it, realistic prose is **unchanged** (84.4 tok/s, inside the
+band already published); the reproduction/copy workload, where the drafter
+proposes far more per step, is the cell that might move and is not yet
+re-measured. Install it anyway — it is free and removes a silent half-speed
+path. `verify.sh` now tests the real predicate instead of a bare import. Do not fix the version mismatch by downgrading
 `flashinfer-python`: that drags torch back and breaks vLLM's C extension — the
 launchers export `FLASHINFER_DISABLE_VERSION_CHECK=1` instead.
 
@@ -119,7 +125,7 @@ for p in patches/*.patch; do
 done
 ```
 
-This loop applies all 23 patches in filename order — including the four this
+This loop applies all 24 patches in filename order — including the five this
 fork adds. Order matters, which is why the DFlash2 one is named
 `zz-dflash2-pipeline-parallel.patch`: it must be last because it edits files
 earlier patches also touch. `vllm-pr46994-mtp-pp.patch` (MTP + pipeline
@@ -140,6 +146,14 @@ here ships `--enable-auto-tool-choice`), `vision-tower-cpu-offload.patch`
 `KV=int4pth` under `SPEC=dflash2`; `KV=int4pth` under MTP is unchanged, since
 the padded-page branch it adds only fires when a promoted drafter layer pads
 the pages) and `dflash2-ngram-chains.patch` (`CHAIN=1`, off by default).
+
+`dflash2-ngram-chains.patch` needed a fifth fork patch to be usable at all:
+`zzzz-dflash2-chain-pp-propose.patch`. Its `propose()` override drops the
+`intermediate_tensors` parameter this fork's PP patch adds to the base method,
+so **both DFlash2 profiles died in warmup** — with `CHAIN=0` as readily as
+`CHAIN=1` — after a boot that looked healthy through KV sizing and graph
+capture. `zzzz-` sorts after both the patch that creates the override and the
+one that creates the conflict.
 
 ## 5. Verify the install
 

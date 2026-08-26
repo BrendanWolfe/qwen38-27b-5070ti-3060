@@ -1,0 +1,51 @@
+Fork patch: let the n-gram chain's propose() override carry intermediate_tensors.
+
+dflash2-ngram-chains.patch (upstream #38) adds a propose() override on
+DFlash2Speculator that delegates to super().propose(). Its signature is a copy
+of stock 0.27.1's, which has no intermediate_tensors parameter -- but this
+fork's zz-dflash2-pipeline-parallel.patch adds exactly that parameter to the
+base DFlashSpeculator.propose(), because under pipeline parallelism the
+speculator runs on the last rank and needs the hidden states the previous stage
+sent. The model runner passes it by keyword on every step, so the override
+shadows the base method and the engine dies during warmup, before the first
+token:
+
+  File "vllm/v1/worker/gpu/model_runner.py", line 1638, in sample_tokens
+    draft_tokens = self.speculator.propose(
+  TypeError: DFlash2Speculator.propose() got an unexpected keyword argument
+  'intermediate_tensors'
+
+Reproduced on this pair with heterogeneous/start_qwen_dflash2_solo.sh: pool
+sizes correctly at 202,174 tokens, both ranks capture their graphs, and
+Worker_PP1 then raises the TypeError in warmup_kernels. It fires with
+VLLM_DFLASH2_CHAIN unset as well as set -- the mismatch is in the signature,
+not in the chain logic -- so on this fork the upstream patch takes out BOTH
+DFlash2 profiles rather than only the opt-in feature.
+
+The fix is to accept the parameter and forward it. The chain fast path does not
+need it: _chain_generate never runs the draft model forward (context KV insert
++ suffix lookup + point-mass rewrite only), so there are no cross-stage hidden
+states for it to consume. Only the super() delegation carries it through.
+
+Named zzzz- so it applies after both dflash2-ngram-chains.patch (which creates
+the override) and zz-dflash2-pipeline-parallel.patch (which creates the reason
+it needs fixing).
+
+--- a/v1/worker/gpu/spec_decode/dflash2/speculator.py
++++ b/v1/worker/gpu/spec_decode/dflash2/speculator.py
+@@ -418,6 +418,7 @@
+         skip_attn_for_dummy_run=False,
+         mm_inputs=None,
+         is_profile=False,
++        intermediate_tensors=None,
+     ):
+         # Chain eligibility is decided HERE, on the host, once per step --
+         # propose() is never captured, so this state machine survives FULL
+@@ -495,6 +496,7 @@
+             skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+             mm_inputs=mm_inputs,
+             is_profile=is_profile,
++            intermediate_tensors=intermediate_tensors,
+         )
+ 
+     def _chain_should_engage(self, prev_missed: bool) -> bool:
