@@ -121,3 +121,77 @@ of each other. Reproduction-shaped prompts do climb, consistent with `LOOKUP` dr
 
 The original report says "peaked at around 208", and a peak is not a median; the prompt was
 not published. Recorded as unreproduced rather than disputed.
+
+---
+
+*Added August 2026, second pass. Everything below shares the stack above; where it does not,
+the row says so.*
+
+## Concurrency ladder — and the 3090/4090 gap widens with load
+
+`bench/conc_ladder.py --n 1,2,4,8 --out 256 --reps 2`, `CTX=long`, `MAX_SEQS=8`, shipped
+`KV_MEM` pin. The 4090 column is fermion's run of the identical command under WSL2
+([wsl2-4090.md](../wsl2-4090.md)).
+
+| N | 3090 /stream | 4090 /stream | ratio | 3090 agg | 4090 agg | kv% 3090 | kv% 4090 | preempt |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 129.1 | 149.7 | 1.16× | 128 | — | 19.7 | — | 0 / 0 |
+| 2 | 91.8 | 119.8 | 1.31× | 236 | 278 | 38.3 | — | 0 / 0 |
+| 4 | 46.6 | 79.0 | 1.70× | **316** | **517** | 73.5 | 71.1 | 0 / 0 |
+| 8 | 30.3 | 57.2 | 1.89× | 230\* | 351\* | 98.2 | 98.2 | 2 / 2 |
+
+\* Tail measurement — no instant at which all 8 streams were decoding.
+
+Two things fall out, and the second is the one worth carrying away:
+
+- **The concurrency ceiling is pool geometry, not the card.** N=8 goes tail-mode on *both*
+  boxes at **kv 98.2% with 2 preemptions each** — same occupancy to the decimal, same failure
+  mode, same count. A 4090 does not buy N=8 in long mode; it buys the same wall, reached
+  faster. And **N=8 is strictly dominated by N=4 in aggregate on both cards** (230 vs 316
+  here, 351 vs 517 there) — not a tradeoff, a loss.
+- **The 4090's per-stream advantage widens with N: +16% at N=1 → +89% at N=8.** This is
+  consistent with, and extends, the README's own explanation of its +1.9% 4090 row
+  ([#32](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/32)): *batch-1 decode is
+  bandwidth-bound, the extra compute has nothing to bite on.* Raise N and the forward pass
+  goes compute-bound, and sm_89 pulls away. **Sizing a card from a single-stream benchmark
+  under-buys for concurrency by roughly 5× the error you think you are making.**
+
+*Instrument caveats, both found the hard way:* `kv%` is documented as **peak** occupancy
+sampled every 250 ms, and our N=4 run lasts 1.70× longer than fermion's on the same output
+budget — so it gets 1.70× the draws at catching the same transient. **A peak-of-poll compared
+across runs of different duration is structurally biased upward on the slower machine.**
+Compare `preempt` and tail-mode onset instead: discrete, duration-invariant, and they matched
+exactly. Separately, `conc_ladder.py:245` puts `int(time.time())` inside every prompt salt, so
+token counts differ per box, per run, per rep by design.
+
+## `VLLM_DFLASH2_LOOKUP`, and how to measure an env toggle at all
+
+Every env-toggle A/B on this stack is a **cross-boot** comparison — the toggle needs a
+restart — so it is only readable against a measured boot-to-boot floor. Ours, on this build
+(`fa11c73`, pre-[#38](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/38)), warmed,
+median of 2 passes per boot, env read back from `/proc/<pid>/environ` rather than trusted from
+the shell:
+
+| | boots | prose | code |
+|---|---:|---|---|
+| `LOOKUP=1` (default) | 3 | 142.85 · 142.89 · 142.78 → **142.84** | 185.53 · 185.41 · 185.50 → **185.48** |
+| `LOOKUP=0` | 2 | 157.64 · 157.54 → **157.59** | 185.63 · 185.57 → **185.60** |
+| boot floor (worst spread) | | **0.070%** | **0.065%** |
+| effect | | **+10.33% — 147× the floor, stands** | +0.06% — 1× the floor, **unresolved** |
+
+**On novel generation the lookup lane is net overhead on prose here, and invisible on code.**
+Its value is context reproduction, exactly as the `DFLASH_TOKENS=15` documentation says.
+Code is *inside our floor* and we report it as unresolved rather than as zero — fermion
+measures a real +7.7% there, and our silence is not evidence against it.
+
+**The boot floor is a property of what state the boot inherited, not of the stack.** Ours is
+0.07% across plain restarts that reuse the venv and `torch.compile` cache. Fermion measured
+**8.7%** across a boot that followed an *image rebuild* with cold JIT caches — and a
+"regression" found that way was retracted once warm boots were compared. The README's
+"first run reads low" warning operates at **boot** granularity; one warmup generation does not
+warm a boot.
+
+*Falsifier for everything in this section:* single RTX 3090 at 250 W, 453 MiB driver-reserved,
+nothing else resident, native Linux with no container, `llama-chip` stopped for the duration
+and verified healthy afterward. Prompts are two fixed strings (one prose, one code), not the
+harness cohorts — comparable to each other, loosely comparable to anything else.
