@@ -156,6 +156,16 @@ Two things fall out, and the second is the one worth carrying away:
   goes compute-bound, and sm_89 pulls away. **Sizing a card from a single-stream benchmark
   under-buys for concurrency by roughly 5× the error you think you are making.**
 
+**What this ladder cannot see, and it is the binding constraint on mixed load.** Every stream
+here carries a uniform ~4k prompt, so every prefill is small and comparable — the ladder
+measures *decode* concurrency and is structurally blind to **prefill head-of-line blocking**.
+fermion measured the case it misses: one 72.6k "whale" against 4k "minnows", where the deep
+prefill monopolises the engine for its full ~65 s, admitted minnows ration to ~1 tok/s, and
+the rest queue behind the entire prefill (TTFT 63–82 s). Cached whale, same scenario: 72.2 s
+→ 13.5 s wall. **So "N=4 is the sweet spot, N=8 is strictly dominated" is scoped to uniform
+short-prompt load** — under mixed depth the constraint is prefill admission, not decode
+concurrency, and the ladder's advice does not transfer.
+
 *Instrument caveats, both found the hard way:* `kv%` is documented as **peak** occupancy
 sampled every 250 ms, and our N=4 run lasts 1.70× longer than fermion's on the same output
 budget — so it gets 1.70× the draws at catching the same transient. **A peak-of-poll compared
