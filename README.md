@@ -37,8 +37,11 @@ of TTFT ([full matrix](batch/README.md#prefill)). How each number was won:
 
 ## Quick start
 
-Docker (recommended — image build, model download and requantization, then
-the server; the API is OpenAI-compatible on port 18020):
+Docker is the default: the image is prebuilt and pushed to
+[ghcr.io](https://github.com/syv-ai/qwen38-27b-rtx3090/pkgs/container/qwen38-27b-rtx3090)
+on every commit — the build applies all `patches/` and runs `verify.sh` as its
+gate, so `latest` is always the current stack — and the only local work is the
+model download and requantization. The API is OpenAI-compatible on port 18020:
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
@@ -551,9 +554,12 @@ memory system's ramp on 16-92 MB reads, not the kernel).
 
 ## Setup
 
+The default install is the container ([Quick start](#quick-start) — the
+prebuilt image already contains everything this section builds), so this
+manual venv path is for hacking on the stack, or running it bare-metal.
 You need: a 24 GB Ampere or newer NVIDIA card, a recent driver, Python 3.12,
 ~40 GB disk. Everything below is CPU-safe to run while the GPU does other
-things. (Or skip the venv and use the container: [docs/docker.md](docs/docker.md).)
+things; the container details live in [docs/docker.md](docs/docker.md).
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 ~/qwen-serving
