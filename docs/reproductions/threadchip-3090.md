@@ -179,6 +179,12 @@ the shell:
 | boot floor (worst spread) | | **0.070%** | **0.065%** |
 | effect | | **+10.33% — 147× the floor, stands** | +0.06% — 1× the floor, **unresolved** |
 
+*Audited after the fact, because the harness timed whole requests including prefill:* re-ran
+streamed with TTFT split out, and the effect is the same three ways — whole-window unstreamed
+**+10.33%**, whole-window streamed **+9.92%**, **decode-only +9.96%**. The arms were clean for
+the dull reason: ~200-token prompts against a working prefix cache leave no prefill worth
+contaminating.
+
 **On novel generation the lookup lane is net overhead on prose here, and invisible on code.**
 Its value is context reproduction, exactly as the `DFLASH_TOKENS=15` documentation says.
 Code is *inside our floor* and we report it as unresolved rather than as zero — fermion
@@ -195,3 +201,46 @@ warm a boot.
 nothing else resident, native Linux with no container, `llama-chip` stopped for the duration
 and verified healthy afterward. Prompts are two fixed strings (one prose, one code), not the
 harness cohorts — comparable to each other, loosely comparable to anything else.
+
+
+## int4 KV (#42) — the 256k window serves on a 3090, and recall holds at 218k
+
+`single-user/alternative.sh`, `MAX_LEN=256000`, `SPEC=off`, nothing else changed.
+
+| | |
+|---|---|
+| GPU KV cache size | **266,520 tokens** |
+| max_model_len served | 256,000 |
+| VRAM | 22,612 MiB |
+| attention block size the engine chose | **1696** |
+
+Needle planted at depth and asked back — one distinctive literal, four positions:
+
+| prompt tokens | depth | recall | wall |
+|---:|---:|:---:|---:|
+| 29,653 | 25% | **HIT** | 36 s |
+| 96,368 | 50% | **HIT** | 215 s |
+| 168,542 | 75% | **HIT** | 563 s |
+| **218,085** | 50% | **HIT** | 893 s |
+
+218,085 is the same depth at which KVarN 4/2-bit recalls exactly on this box, so **int4 is
+not worse than the alternative already trusted here.**
+
+**Read this narrowly.** A needle is a *recall* test, not a *quality* test: a distinctive
+literal is close to the easiest thing a degraded KV can still retrieve. Four depths, n=1
+each, one needle string, spec off. It licenses *"int4 does not lose the plot at 218k"* and
+**not** *"int4 is lossless at 218k"* — the second wants a teacher-forced comparison against
+bf16 at depth, which nobody has run.
+
+*`SPEC=off` is not incidental:* fermion measured spec-on 25.2 against spec-off 35.5 tok/s at
+72k depth on this profile — **speculation is a 1.4× slowdown there**, because acceptance
+around .30 across 7 draft tokens cannot beat plain q=1 decode.
+
+### The prefix-match unit is per-(model, kv-dtype, draft-length), not per-card
+
+This 3090 reports `Setting attention block size to 1696 tokens` under int4 — **identical to
+fermion's 4090.** The card enters only through how much pool fits. The axis that does move it
+is the draft length: at `DFLASH_TOKENS=3` the same stack reports 1616. So **a user changing
+`DFLASH_TOKENS` silently changes the only valid `--prefix-match-unit` underneath themselves**,
+and any value has to be read from the boot log rather than inherited from another machine or
+another profile.
