@@ -483,6 +483,10 @@ other only loosely, and not rows for the table above:
   prompts, output length and rate definition, so deliberately not in the table
   (their own insistence, and correct). Setup gotchas and the full ladder:
   [#35](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/35).
+- **RTX 4090, Windows 11 / WSL2 (Docker path)**: reproduces with zero repo
+  changes; CTX ladder incl. huge's pool byte-identical to the 3090 reference
+  (268,169), concurrency ladder to N=8, and a measured both-ways case for
+  leaving the `KV_MEM` pin alone — [docs/wsl2-4090.md](docs/wsl2-4090.md).
 - **Dual-GPU reports**: the controlled 1-vs-2×3090 A/B in
   [#40](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/40) (+16–35%,
   161.6 C1 greedy at 275 W, PCIe x8 without NVLink; independently reproduced
