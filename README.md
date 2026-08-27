@@ -42,6 +42,7 @@ the server; the API is OpenAI-compatible on port 18020):
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
+docker compose pull                        # prebuilt image from ghcr.io; skip to build locally
 docker compose --profile single up -d      # one or a few users; or --profile batch
 ```
 

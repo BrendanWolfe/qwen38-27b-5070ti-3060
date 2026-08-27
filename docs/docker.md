@@ -15,11 +15,19 @@ configured as a runtime. The 250 W power limit is a host setting
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
 echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env   # all knobs live in .env (gitignored)
+docker compose pull                                 # prebuilt image from ghcr.io (~9.5 GB)
 docker compose --profile single up -d               # or --profile batch
 docker compose logs -f single
 ```
 
-The first `up` builds the image (9.5 GB), then the `prepare` service downloads
+**The image is prebuilt**: every push to `main` builds and pushes
+`ghcr.io/syv-ai/qwen38-27b-rtx3090:latest` (plus an immutable `sha-<7>` tag
+per commit) from CI, with the Dockerfile's own patch application and
+`verify.sh --install` as the gate — a patch that stops applying fails the
+build and nothing is pushed. `docker compose pull` gets it; to pin a known
+build, set `image: ghcr.io/syv-ai/qwen38-27b-rtx3090:sha-<7>` in a compose
+override. Skipping the pull still works — the first `up` then builds the
+identical image locally (9.5 GB, ~20 minutes), and the `prepare` service downloads
 the model into `./models` and runs the same requantization scripts as above
 (CPU only, idempotent, ~20 GB + a few minutes; `FAST_VARIANT=0` in `.env`
 skips the ~1 GB fast-variant download), then the server starts. The first
