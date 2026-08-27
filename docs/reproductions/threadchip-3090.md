@@ -52,13 +52,20 @@ cohort so no row is measuring cache warmth instead of concurrency.
 | huge | shallow | 134.1 | 220.9 | 157.6 | 232.2 |
 | huge | deep (44k) | 43.6 | 50.1 | 53.3 | 52.8 |
 
-**Scope note: every row above is speculation-ON, and at depth that is not the same as
-speculation earning something.** fermion measured spec-on ≈ spec-off at 72k on this model —
-35.6 vs ~35.5 under KVarN, and 25.2 vs 35.5 under int4 where speculation is an outright 1.4×
-*slowdown*. Acceptance at depth is .286/.290 across the two KV dtypes, identical, so the
-decay is model-and-depth rather than dtype. **These deep rows therefore measure the KV
-profile, not the speculator** — there is no spec-off column here and a reader should not infer
-one.
+**Scope note: every row above is speculation-ON, and at depth speculation is worth roughly
+2×.** fermion's first reading of this had the opposite sign and was retracted: their
+deep-decode probe counted SSE chunks, and that stack emits **one chunk per speculative step**,
+so every spec-on number was low by the emitted/step factor (~3×). Token-true, at 72k: int4
+with the wide-verify kernel **70–75 tok/s**, `long` **64–68**, against spec-off **35.5**.
+Acceptance at depth is .286/.290 across the two KV dtypes — identical, so the decay is
+model-and-depth rather than dtype. **These deep rows are therefore speculator and profile
+jointly**, and there is no spec-off column here to separate them.
+
+*The counting hazard is worth stating for anyone reproducing this:* under speculation, a
+chunk count is a **step** count. Spec-off is immune at one token per step, which is exactly
+why the wrong world looks self-consistent. Everything in this document takes its token counts
+from `usage.completion_tokens` or the server's `generation_tokens_total` counter, never from
+delta counting — `bench/conc_ladder.py` uses SSE deltas only for first/last timestamps.
 
 `CTX=huge` costs roughly 10% shallow and 8% deep against `long`, for 1.9× the window. At
 depth the larger pools hold up where `fast` does not.
