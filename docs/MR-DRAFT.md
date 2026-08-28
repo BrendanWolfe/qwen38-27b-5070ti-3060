@@ -2,9 +2,10 @@
 
 > **DRAFT — not filed.** This is the assembled body for the single upstream MR
 > covering both boxes (RTX 4090 / WSL2 / Windows 11 · RTX 3090 / native
-> Ubuntu). Michael files it. One measurement slot is still open (§7, the
-> needle-at-max-len probe, running on the 3090). Every number below traces to
-> the bench record; the load-bearing claims are measured on both boxes.
+> Ubuntu). Michael files it. Every planned measurement on both boxes is in;
+> every number below traces to the bench record and the 3090 seat has
+> reviewed its own rows (no misquotes found); the load-bearing claims are
+> measured on both boxes.
 
 ## Summary
 
@@ -99,8 +100,11 @@ tokens = 82% of a 136,429-token pool):
 
 The tax is mamba-dominated (fixed-size per-seq state pages, ≈2× at ~37k
 contexts) plus drafter groups (to ~2.7× under spec). Consequence for the
-engine's own banner: **"Maximum concurrency" overestimates ~2.68×** because it
-divides pool by max_len and ignores the group pages.
+engine's own banner: **"Maximum concurrency" overestimates multi-context
+capacity ~2.68×** because it divides pool by max_len and ignores the group
+pages. (The 2.68× is measured on the 4090; the 3090 corroborates it by
+independent derivation from its own boot-log arithmetic against the measured
+~1.3-context capacity — corroboration, not a second measurement.)
 
 **Product sentence:** with the CPU offload tier (§6), the same round-robin
 pattern goes **0/3 → 3/3** (three 72.6k whales all recheck warm at 4.2–4.3s
@@ -124,9 +128,14 @@ falsifiable than a warn-and-continue shape.
 Falsification bracket: WSL2 with fix = 3 whales warm, 0 IMAs; fix removed =
 IMA ×3, first prime dies. Native = three arms byte-identical at 52.4 tok/s,
 805 MB moved through the tier live, loader resolves via `CDLL(None)`, rc=0,
-delta=0. Loader note: pip wheels ship only *versioned* cudart sonames at
-wheel paths, so `CDLL("libcudart.so")` fails on most native installs —
-resolve from the process image first.
+delta=0. **The bracket is trustworthy only for v3.** v1's native arms
+"passed" inert: `CDLL("libcudart.so")` throws on standard pip installs (the
+wheels ship only *versioned* sonames at wheel paths), so v1's happy path
+never executed on native — and discovering that is what exposed v2's
+would-be regression (its raise would have refused most native boxes). v3
+resolves from the process image first and raises on every failure, so a
+live patched engine is itself the execution proof — the evidence behind
+§9's falsifiability claim.
 
 Production-form follow-on (tracked, not in this MR): typed two-pointer
 separation instead of a delta attribute, transfer records, restored-state
@@ -148,12 +157,20 @@ checksums, lifecycle/teardown coverage.
   (huge MS=2 shows 44.7% KV at N=2, yet 2 × 245,760 > the 268,169 pool —
   and that arithmetic is naive-token, i.e. optimistic, per §5's tax). **The
   two gauges lie in opposite directions** — kv% understates worst-case
-  admission risk, the concurrency banner overstates capacity ~2.68× — so an
-  operator reading both sees headroom twice and tunes into a cliff. Size
-  MAX_SEQS to the workload's real prompt distribution, never to a gauge.
-- **[PENDING — needle-at-max-len probe, 3090]**: does ONE full 245,760-token
-  request complete on `huge`? If not, the banner is wrong about *one*, not
-  merely optimistic about concurrency.
+  admission risk, the concurrency banner overstates multi-context capacity
+  ~2.68× (honest at N=1; see the needle row below) — so an operator reading
+  both sees headroom twice and tunes into a cliff. Size MAX_SEQS to the
+  workload's real prompt distribution, never to a gauge.
+- **Needle-at-max-len (3090)**: a single request climbing to **234,158
+  tokens — 95.3% of max_model_len — completes with exact needle recall**
+  (the last 4.7% untested: the corpus ran out, not the engine). So the
+  banner is honest about *one*, which sharpens the criticism rather than
+  softening it: the banner is not wrong about capacity but about **what
+  capacity means**. `pool / max_model_len` is a true statement about a
+  single live request and a ~2.68× overstatement the moment the question is
+  concurrent or cached contexts, where the 9-group page tax applies. Same
+  number, honest in one regime and misleading in the other, with nothing on
+  the line to say which regime you are in.
 - **Politeness knob**: `--max-num-batched-tokens 512` makes minnows live
   (~5s) under a whale prefill for ~15% whale tax (prefill head-of-line
   blocking is the mechanism).
