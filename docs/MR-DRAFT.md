@@ -100,18 +100,30 @@ tokens = 82% of a 136,429-token pool):
   **0/3**, every recheck ~1.0× cold. The sweep's own prefills evict the next
   context before it is asked.
 
-The tax is mamba-dominated (fixed-size per-seq state pages, ≈2× at ~37k
-contexts) plus drafter groups (to ~2.7× under spec). Consequence for the
-engine's own banner: **"Maximum concurrency" overestimates multi-context
-capacity ~2.68×** because it divides pool by max_len and ignores the group
-pages. (The 2.68× is measured on the 4090; the 3090 corroborates it by
-independent derivation from its own boot-log arithmetic against the measured
-~1.3-context capacity — corroboration, not a second measurement.)
+The tax is mamba-dominated (fixed-size per-seq state pages) plus drafter
+groups. Measured bounds: on the 4090 (int4 geometry, 300,583-token pool),
+two 72.6k contexts do **not** both stay warm (K=2 no-tier round-robin =
+0/2), so real per-context cost exceeds 150k tokens at 72.6k — a multiplier
+above 2.07× at that depth. Consequence for the engine's own banner: its
+number is **right only at full length** (proved by the needle probe, §7).
+At shorter or cached contexts the real cost per context is substantially
+larger than its token count — and a naive constant-plus-linear model
+computed from the engine's own spec bytes still *under*counts the measured
+cost (we falsified our own corrective banner patch against this data; the
+gap mechanism — drafter group pages, per-group block rounding, or
+prefix-retention granularity — is an open question this MR flags rather
+than answers).
 
 **Product sentence:** with the CPU offload tier (§6), the same round-robin
-pattern goes **0/3 → 3/3** (three 72.6k whales all recheck warm at 4.2–4.3s
-on the 4090). The tier doesn't merely raise capacity; it converts the serving
-pattern operators actually run from zero reuse to full reuse.
+pattern goes **0/3 → 3/3** (three 72.6k whales all recheck in 4.2–4.3s on
+the 4090 — tier restores, not GPU-warm hits, and that is the point: the
+GPU pool holds ~one such context warm, and the tier serves the rest at
+interactive latency instead of a 62s recompute). Measured under true
+concurrency: three simultaneous agents, each on its own 72.6k context,
+firing repeatedly — every round completes with **zero recomputes**;
+unqueued tier restores land in 5–7s, the LRU-rotated seat pays ~16s
+restoring under load, against 62s cold. Three deep agents on one 24 GB
+card is a serving pattern this tier makes real.
 
 ## 6. The OffloadingConnector fix (the patch in this MR)
 
@@ -160,19 +172,20 @@ checksums, lifecycle/teardown coverage.
   and that arithmetic is naive-token, i.e. optimistic, per §5's tax). **The
   two gauges lie in opposite directions** — kv% understates worst-case
   admission risk, the concurrency banner overstates multi-context capacity
-  ~2.68× (honest at N=1; see the needle row below) — so an operator reading
-  both sees headroom twice and tunes into a cliff. Size MAX_SEQS to the
-  workload's real prompt distribution, never to a gauge.
+  by 2×+ (measured bound, §5; honest at N=1 — see the needle row below) —
+  so an operator reading both sees headroom twice and tunes into a cliff.
+  Size MAX_SEQS to the workload's real prompt distribution, never to a
+  gauge.
 - **Needle-at-max-len (3090)**: a single request climbing to **234,158
   tokens — 95.3% of max_model_len — completes with exact needle recall**
   (the last 4.7% untested: the corpus ran out, not the engine). So the
   banner is honest about *one*, which sharpens the criticism rather than
   softening it: the banner is not wrong about capacity but about **what
   capacity means**. `pool / max_model_len` is a true statement about a
-  single live request and a ~2.68× overstatement the moment the question is
-  concurrent or cached contexts, where the 9-group page tax applies. Same
-  number, honest in one regime and misleading in the other, with nothing on
-  the line to say which regime you are in.
+  single live request and a 2×+ overstatement (measured bound, §5) the
+  moment the question is concurrent or cached contexts, where the 9-group
+  page tax applies. Same number, honest in one regime and misleading in the
+  other, with nothing on the line to say which regime you are in.
 - **Politeness knob**: `--max-num-batched-tokens 512` makes minnows live
   (~5s) under a whale prefill for ~15% whale tax (prefill head-of-line
   blocking is the mechanism).
@@ -206,5 +219,11 @@ campaign's capstone, paid for twice: **a pass from an unexecuted branch is
 indistinguishable from a pass — only the execution count tells you which you
 have.** (v1 of the offload fix "validated" on four arms whose happy path
 never ran; v3 was redesigned so every failure branch raises and a live
-engine is itself the proof of execution.) Corrections throughout the docs
-are struck in place, not cleaned — the record keeps its own history legible.
+engine is itself the proof of execution.) The same discipline killed one of
+our own contributions before it could ship: a banner patch printing
+model-derived warm-context capacity passed its internal-consistency check,
+then failed its pre-registered tier-off falsification (predicted 2/2,
+measured 0/2) — it is parked on an experiment branch as mechanism data, not
+merged, because a wrong honesty line is worse than none. Corrections
+throughout the docs are struck in place, not cleaned — the record keeps its
+own history legible.
