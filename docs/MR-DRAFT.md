@@ -111,11 +111,16 @@ multiplicative (`cost = m·L`) fails on int4 (K=2 caps m at 2.93 while a
 K=3 0/3 at ~31.7k requires m > 3.18 — disjoint), and pure
 additive-constant (`cost = L + F`, the model our own falsified banner
 patch implemented from the engine's spec bytes) fails on int8 (K=2 and
-K=3 demand F in disjoint intervals). An affine shape (slope ≈2.5
-pool-tokens per context token plus a small dtype-dependent constant) fits
-every boundary on both boxes, but that is a two-parameter fit against six
-inequalities — a candidate, not a finding. This MR ships the measured
-brackets and flags the cost-shape mechanism as open. The engine's own
+K=3 demand F in disjoint intervals). An affine shape (`cost = a·L + F`)
+fits every boundary on both boxes — but the feasible region is wide:
+every slope from a = 1.5 to a = 4.0 admits some constant, so **the affine
+is the last model standing, which is a different claim from the affine
+being right**. What would actually bite is not another data point but a
+designed rung where two feasible (a, F) pairs predict opposite outcomes
+(feasible pairs diverge fast at large L) — left as follow-on. This MR
+ships the measured brackets — every boundary rung on both boxes
+reproduced **alone in a fresh boot** before being called a measurement —
+and flags the cost-shape mechanism as open. The engine's own
 banner is **right only at full length** (proved by the needle probe, §7);
 at shorter or cached contexts nothing in the log says the real cost is
 2–3× the token count — which is the operator trap.
@@ -229,7 +234,13 @@ not assumption); ladder rungs must share no prefix (a descending ladder
 with fixed salts is contaminated at exactly the rung being hunted, while
 the same code read ascending is safe); and the boundary rung must
 reproduce **in isolation** — a fresh boot at that length alone — before
-the number is real. The
+the number is real. The model rejections in §5 rested on two paired
+halves, and both are load-bearing: **over-determination is the only thing
+that can kill a model** (two boundaries fitting two one-parameter models
+is an exactly-determined fit that cannot lose), and **pre-registered
+opposite predictions on a single rung** are what let one rung reject
+anything at all — over-determination without pre-registration would have
+let either reading survive. The
 falsification bracket as the standard of "fixed": reproduce the failure,
 apply the fix, watch it pass, remove the fix, watch it fail again. And the
 campaign's capstone, paid for twice: **a pass from an unexecuted branch is
