@@ -101,18 +101,24 @@ tokens = 82% of a 136,429-token pool):
   context before it is asked.
 
 The tax is mamba-dominated (fixed-size per-seq state pages) plus drafter
-groups. Measured bounds: on the 4090 (int4 geometry, 300,583-token pool),
-two 72.6k contexts do **not** both stay warm (K=2 no-tier round-robin =
-0/2), so real per-context cost exceeds 150k tokens at 72.6k — a multiplier
-above 2.07× at that depth. Consequence for the engine's own banner: its
-number is **right only at full length** (proved by the needle probe, §7).
-At shorter or cached contexts the real cost per context is substantially
-larger than its token count — and a naive constant-plus-linear model
-computed from the engine's own spec bytes still *under*counts the measured
-cost (we falsified our own corrective banner patch against this data; the
-gap mechanism — drafter group pages, per-group block rounding, or
-prefix-retention granularity — is an open question this MR flags rather
-than answers).
+groups. **Measured** (L-bisection with per-length salts, tier off, each
+boundary rung required to reproduce alone in a fresh boot): per-context
+retention cost is **≈2.5–2.9× its token count** at ~51–61k-token contexts
+on the 4090/int4 geometry (pool 300,583), and **≈2.3–2.7×** at ~25–29k on
+the 3090/int8 geometry (pool 136,429). Pre-registered K=3 discriminator
+rungs then rejected **both** simple cost models, one per geometry: pure
+multiplicative (`cost = m·L`) fails on int4 (K=2 caps m at 2.93 while a
+K=3 0/3 at ~31.7k requires m > 3.18 — disjoint), and pure
+additive-constant (`cost = L + F`, the model our own falsified banner
+patch implemented from the engine's spec bytes) fails on int8 (K=2 and
+K=3 demand F in disjoint intervals). An affine shape (slope ≈2.5
+pool-tokens per context token plus a small dtype-dependent constant) fits
+every boundary on both boxes, but that is a two-parameter fit against six
+inequalities — a candidate, not a finding. This MR ships the measured
+brackets and flags the cost-shape mechanism as open. The engine's own
+banner is **right only at full length** (proved by the needle probe, §7);
+at shorter or cached contexts nothing in the log says the real cost is
+2–3× the token count — which is the operator trap.
 
 **Product sentence:** with the CPU offload tier (§6), the same round-robin
 pattern goes **0/3 → 3/3** (three 72.6k whales all recheck in 4.2–4.3s on
