@@ -569,6 +569,12 @@ memory system's ramp on 16-92 MB reads, not the kernel).
 The default install is the container ([Quick start](#quick-start) — the
 prebuilt image already contains everything this section builds), so this
 manual venv path is for hacking on the stack, or running it bare-metal.
+
+> **Python 3.14 works natively** — nothing in this repo needs changing, but
+> `python3.14-dev` does need installing. See [docs/python-314.md](docs/python-314.md),
+> with a full RTX 3090 reproduction of the tables below in
+> [docs/reproductions/threadchip-3090.md](docs/reproductions/threadchip-3090.md).
+
 You need: a 24 GB Ampere or newer NVIDIA card, a recent driver, Python 3.12,
 ~40 GB disk. Everything below is CPU-safe to run while the GPU does other
 things; the container details live in [docs/docker.md](docs/docker.md).
