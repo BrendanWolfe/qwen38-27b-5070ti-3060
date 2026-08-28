@@ -61,12 +61,14 @@ the kernel turns that into a 2× win.
 Stock #42's spec-decode path launches the int4 attention kernel once per query
 position (2D grid); the MQ-3D form dispatches all q positions in one 3D launch
 with a reducer guard. 33 lines. Measured: 8.14 → 25.2–25.4 steps/s at 72.6k
-(×2.74 step rate), true e2e 22.3 → ~73 tok/s (~3.3×). **Held behind six
-promotion gates** before it should merge: 72k operator/logit oracle ·
-full-length exactness · per-position logit comparison · eager+captured+q=9
-parity · shallow crossover (shallow shows −16%; wants a seq_len floor) ·
-capture-aware dual-variant switching. Included as its own commit so it can be
-cut without touching the rest.
+(×2.74 step rate), true e2e 22.3 → ~73 tok/s (~3.3×). Ships as
+`patches/spec-decode-int4-kv-mq3d.patch` with the dispatch **opt-in**
+(`VLLM_INT4_MQ_3D=1`; default off) because six promotion gates remain open
+before it should become the default: 72k operator/logit oracle · full-length
+exactness · per-position logit comparison · eager+captured+q=9 parity ·
+shallow crossover (shallow shows −16%; wants a seq_len floor) ·
+capture-aware dual-variant switching. Its own commit, cuttable without
+touching the rest.
 
 ## 4. Prefix-cache zero-reuse on int4 + DFlash2 — the one-flag fix
 
