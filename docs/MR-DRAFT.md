@@ -212,7 +212,18 @@ checksums, lifecycle/teardown coverage.
 ## 9. Methodology
 
 Pre-registered predictions before each arm (two held across the campaign;
-six mechanism stories died on instruments built to kill them). The
+six mechanism stories died on instruments built to kill them). One rule
+this campaign paid for four times, in four different ways: **a retention
+measurement is only valid when nothing else can produce a fast recheck.**
+A tier restore, a shared prefix between ladder rungs, and pool residue
+from a prior rung all read as "retained" through a latency threshold — a
+latency threshold is not a mechanism discriminator. Corollaries: retention
+numbers are valid only with the offload tier off (stated as precondition,
+not assumption); ladder rungs must share no prefix (a descending ladder
+with fixed salts is contaminated at exactly the rung being hunted, while
+the same code read ascending is safe); and the boundary rung must
+reproduce **in isolation** — a fresh boot at that length alone — before
+the number is real. The
 falsification bracket as the standard of "fixed": reproduce the failure,
 apply the fix, watch it pass, remove the fix, watch it fail again. And the
 campaign's capstone, paid for twice: **a pass from an unexecuted branch is
