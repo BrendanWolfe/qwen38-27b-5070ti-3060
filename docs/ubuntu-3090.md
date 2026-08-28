@@ -53,11 +53,17 @@ The round-robin sweep evicts each context via the next recheck's own prefill —
 measured `prompt_tokens` per rung, boundary rungs re-run **alone in fresh
 boots** — both reproduce to the decimal):
 
-| L (tok) | K=2 result |
-|---:|---|
-| 34,124 | 0/2 |
-| 29,340 | 0/2 |
-| **24,865** | **2/2** (2.5s / 2.2s vs 44s cold) |
+| L (tok) | K=2 result | isolated re-run |
+|---:|---|---|
+| 34,124 | 0/2 | — |
+| 29,340 | 0/2 | **29,344 → 0/2**, 35.7s / 37.1s |
+| **24,865** | **2/2** (2.5s / 2.2s vs 44s cold) | **24,869 → 2/2**, 2.5s / 2.2s |
+
+Both boundary rungs were re-run **alone in fresh boots** and reproduce to the
+decimal. That matters because the emptiness argument below leans on *both*
+sides: pool residue from the rung above could in principle manufacture the
+eviction at 29,340, and if the true 0/2 boundary were higher, `F` would be
+smaller and additive would survive.
 
 Per-context retention cost ≈ **2.3–2.7× its token count** at ~25–29k. The
 pre-registered K=3 discriminator (12,142 tok, fresh solo boot) returned
@@ -80,6 +86,16 @@ CTX=long, identical instrument, only MAX_SEQS differs:
 
 Not over-provisioning slots is worth +6.1% at the design point, and the
 designed configs take zero preemptions where the uniform sweep took two.
+
+**Scope, because this ladder cannot see the constraint that binds mixed load.**
+Every stream here carries a uniform ~4k prompt, so every prefill is small and
+comparable: `conc_ladder.py` measures *decode* concurrency and is structurally
+blind to **prefill head-of-line blocking**. The 4090 measured the case it
+misses — one 72.6k whale against 4k minnows, where the deep prefill monopolises
+the engine for its full ~65 s and admitted minnows ration to ~1 tok/s. So
+everything in this section is scoped to **uniform short-prompt load**; under
+mixed depth the binding constraint is prefill admission and none of this advice
+transfers.
 CTX=huge at its designed MS=2 shows 44.7% KV at N=2 — but 2 × 245,760 >
 the 268,169 pool, so MAX_SEQS there is a **worst-case admission bound**
 deliberately overcommitted for realistic prompts, not a throughput setting.
@@ -121,6 +137,14 @@ where the retention tax above applies and nothing on the line says so.
   well as startup.
 - `verify.sh` verifies patch application, not runtime behavior — the nine
   draft groups above were the proof.
+- **`single-user/alternative.sh` silently ignores `SPEC`.** Line 71 hardcodes
+  `--speculative-config` with no guard, so `SPEC=off` still serves n7. Two arms
+  labelled spec-on and spec-off came back *bit-identical*, and the tell was the
+  **emitted/step receipt: 2.29 on an arm that must be 1.00 if speculation were
+  off.** Anyone A/B-ing speculation on the int4 profile gets two spec-on arms and
+  concludes speculation does nothing — one inference from a conclusion this PR
+  had already retracted once by a different road. An unrecognised `SPEC` should
+  refuse, not proceed.
 - Instrument ledger entries paid for here: basic `sed` has no alternation
   without `-E` (a display filter printed nothing while the run was fine —
   instruments persist `--json`); a hardcoded K=2 label printed "3/2" with the
