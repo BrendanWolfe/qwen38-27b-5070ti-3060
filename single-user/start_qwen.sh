@@ -25,6 +25,15 @@
 # CTX=long: fp8 KV via FlashInfer, 150k context, 3 drafts (k=4 crashes on
 #   FlashInfer as soon as one request finishes while another is mid-generation,
 #   vLLM 0.27.1); the split-KV attention patch is bf16-KV only, so ~90/98 tok/s.
+#   KNOW THE EXPOSURE: fp8 KV has exactly ONE backend on sm86 -- FLASH_ATTN
+#   refuses it (needs FA3/SM90+) and TRITON_ATTN refuses it (needs SM89+),
+#   both measured -- so this tier runs FlashInfer with no A/B possible, and
+#   issue #34 tracks a deterministic Xid-31 MMU write-fault seen twice on one
+#   3090 under fp8+MTP+prefix caching at ~28-34k context. The flashinfer-free
+#   fallback is the int8 tier (gotcha 44): what SPEC=dflash2 CTX=long already
+#   ships, or for mtp: VLLM_SPEC_DECODE_ATTN=1 EXTRA_ARGS="--attention-backend
+#   =TRITON_ATTN --kv-cache-dtype=int8_per_token_head" at ~25% wall cost at
+#   depth (23.7 vs 18.9 s for 17.9k in + 256 out, measured).
 # CTX=huge: KVarN 4/2-bit KV cache (kvarn/), 200k context with MTP, at roughly
 #   half the decode rate past 100k — see below and docs/long-context.md.
 #

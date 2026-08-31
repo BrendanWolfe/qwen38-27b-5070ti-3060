@@ -644,3 +644,23 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
        the server cache is healthy and the variable is the client payload
        (or a proxy that mutates it); if it does not, look at the server —
        and at 2 and 4 above.
+
+44. **`CTX=long`'s fp8 KV cache has exactly one attention backend on sm86, and
+    it is the one cell of the matrix this repo cannot A/B.** `FLASH_ATTN`
+    refuses fp8 KV at startup ("requires FA3 on SM90 or FA4 on SM100" —
+    [#34](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/34)) and
+    `TRITON_ATTN` refuses it too ("native FP8 (fp8e4nv) requires SM89+",
+    measured on the reference 3090), so the tier always auto-selects
+    FlashInfer. #34 tracks a deterministic Xid-31 MMU write-fault (same
+    virtual address twice, ~40 h uptime each) on that combination with MTP +
+    prefix caching + chunked prefill at 28-34k context; cause unattributed
+    between flashinfer's workspace and the async-scheduling window as of this
+    entry. If you hit it, the flashinfer-free fallback is the int8 tier:
+    `SPEC=dflash2 CTX=long` ships it by default, and for `SPEC=mtp` it is
+    `VLLM_SPEC_DECODE_ATTN=1 EXTRA_ARGS="--attention-backend=TRITON_ATTN
+    --kv-cache-dtype=int8_per_token_head"`. Measured cost on the reference
+    box: 17.9k in + 256 out takes 23.7 s against fp8/FlashInfer's 18.9
+    (~25% wall at that depth, mostly Triton prefill); in exchange the same
+    pinned pool holds more tokens at int8's geometry. The default stays
+    fp8/FlashInfer: two faults on one box do not justify a 25% tax on every
+    other box, but you should know which combination you are running.
