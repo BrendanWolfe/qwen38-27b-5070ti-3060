@@ -495,6 +495,10 @@ other only loosely, and not rows for the table above:
   prompts, output length and rate definition, so deliberately not in the table
   (their own insistence, and correct). Setup gotchas and the full ladder:
   [#35](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/35).
+- **RTX 4090, Windows 11 / WSL2 (Docker path)**: reproduces with zero repo
+  changes; CTX ladder incl. huge's pool byte-identical to the 3090 reference
+  (268,169), concurrency ladder to N=8, and a measured both-ways case for
+  leaving the `KV_MEM` pin alone — [docs/wsl2-4090.md](docs/wsl2-4090.md).
 - **Dual-GPU reports**: the controlled 1-vs-2×3090 A/B in
   [#40](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/40) (+16–35%,
   161.6 C1 greedy at 275 W, PCIe x8 without NVLink; independently reproduced
@@ -565,6 +569,12 @@ memory system's ramp on 16-92 MB reads, not the kernel).
 The default install is the container ([Quick start](#quick-start) — the
 prebuilt image already contains everything this section builds), so this
 manual venv path is for hacking on the stack, or running it bare-metal.
+
+> **Python 3.14 works natively** — nothing in this repo needs changing, but
+> `python3.14-dev` does need installing. See [docs/python-314.md](docs/python-314.md),
+> with a full RTX 3090 reproduction of the tables below in
+> [docs/reproductions/native-3090.md](docs/reproductions/native-3090.md).
+
 You need: a 24 GB Ampere or newer NVIDIA card, a recent driver, Python 3.12,
 ~40 GB disk. Everything below is CPU-safe to run while the GPU does other
 things; the container details live in [docs/docker.md](docs/docker.md).
