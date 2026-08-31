@@ -68,8 +68,8 @@ MAX_SEQS=${MAX_SEQS:-}
 # path allocates beyond the startup memory profile (docs/gotchas.md, gotcha 4).
 GPU_UTIL=${GPU_UTIL:-0.93}
 API_SERVERS=${API_SERVERS:-1}
-# CTX=long (default): fp8 KV via FlashInfer, 150k context, 3 drafts.
-# CTX=fast: bf16 KV via FlashAttention, ~64k context, 4 drafts (~+7%).
+# CTX=fast (default): bf16 KV via FlashAttention, ~64k context, 4 drafts (~+7%).
+# CTX=long: fp8 KV via FlashInfer, 150k context, 3 drafts.
 # CTX=huge: KVarN 4/2-bit KV cache (kvarn/ in this repo, run kvarn/install.sh
 #           once), 200k context with MTP. The decode tax is a function of context,
 #           not a constant: ~6% on short prompts, but 2.13x at 112k (32.0 vs fp8's
@@ -84,6 +84,10 @@ CTX=${CTX:-fast}
 #   (patches/dflash2-backport.patch). CTX=fast (bf16, 64k), CTX=long (int8,
 #   128k) or, with kvarn/install.sh, CTX=huge (KVarN 4/2-bit, 240k + prefix
 #   caching); see README "DFlash2".
+# SPEC=off (or none): no speculative decoding at all. This used to fall through
+#   to the mtp branch silently -- an A/B with "SPEC=off" was really running two
+#   spec-on arms, which is exactly the trap PR #46's campaign walked into with
+#   alternative.sh. Any other value now refuses instead of proceeding.
 SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
@@ -354,11 +358,21 @@ if [ "$SPEC" = "dflash2" ]; then
          "5-10x slower. Ladder 4k/16k TTFT against known-good rates before trusting it." >&2
   fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
-else
+elif [ "$SPEC" = "off" ] || [ "$SPEC" = "none" ]; then
+  MAX_SEQS=${MAX_SEQS:-8}
+  SPEC_CFG=""
+  CG=${CG:-32}
+elif [ "$SPEC" = "mtp" ]; then
   MAX_SEQS=${MAX_SEQS:-8}
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
   CG=${CG:-32}
+else
+  echo "SPEC=$SPEC is not a mode: mtp (default), dflash2, off. Refusing rather than" >&2
+  echo "silently running mtp -- an unrecognized SPEC in an A/B measures the wrong thing." >&2
+  exit 1
 fi
+SPEC_ARGS=()
+[ -n "$SPEC_CFG" ] && SPEC_ARGS=(--speculative-config "$SPEC_CFG")
 
 # PREFIX_CACHE=1: reuse the KV of a shared prompt prefix across requests, and resume the
 # recurrent (GDN) state from the last cached block boundary instead of re-running the prompt.
@@ -530,8 +544,8 @@ fi
 # the escape hatch -- a limitation of these kernels, not of any checkpoint.
 case " ${EXTRA_ARGS:-} " in
   *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
-    if [ "${SPEC:-mtp}" != "none" ]; then
-      echo "--dtype float16 needs SPEC=none: this repo's speculative path is bf16-only." >&2
+    if [ "$SPEC" != "none" ] && [ "$SPEC" != "off" ]; then
+      echo "--dtype float16 needs SPEC=off: this repo's speculative path is bf16-only." >&2
       echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
       echo "  so it fails to compile at the first attention. See issue #27." >&2
       exit 1
@@ -575,7 +589,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \
   --max-num-batched-tokens 2048 \
-  --speculative-config "$SPEC_CFG" \
+  "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
   ${TOOL_ARGS} \
