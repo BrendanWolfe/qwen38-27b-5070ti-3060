@@ -11,13 +11,18 @@ V2 runner; every blocker was allocator/geometry logic:
     block size that is simultaneously a divisor of 2176 (=17x128), a FlashAttention-2
     multiple of 16, and a KVarN tile multiple.
  4. kv_cache_utils.py: sliding-window groups (the drafter) stay out of the scheduler
-    LCM, but the default hash unit is the GCD over ALL groups INCLUDING them: the
-    hash unit must divide the SW block or fix 5's read guard reports a permanent
-    miss and prefix caching never hits. Invisible under int8 (every block 864);
-    fatal under int4 (non-SW gcd 1696, SW block 848 -- found in #46, where
-    --prefix-match-unit 848 is the equivalent explicit setting). An explicit
-    --prefix-match-unit also now beats the mamba-divergence fallback (which
-    silently ignored it).
+    LCM, but the default hash unit is the GCD over ALL groups INCLUDING them, on
+    BOTH paths that choose it: the hash unit must divide the SW block or fix 5's
+    read guard reports a permanent miss and prefix caching never hits. Invisible
+    under int8 (every block 864); fatal under int4 -- and int4 takes the
+    mamba-divergence FALLBACK (mamba blocks 1696 != cache block 848, measured:
+    groups=[1696 x8, 848]), which used to return the LCM (1696) as the hash unit
+    before the GCD was ever consulted. That second stage is why the explicit
+    --prefix-match-unit 848 from #46 worked while a GCD-only fix still measured
+    0% hits. Both paths now return gcd-all (848 here), the resolver logs its
+    choice at boot, and an explicit --prefix-match-unit beats everything.
+    Validated: int4 + DFlash2 warm 30k re-request 44.1 s -> 6.2 s,
+    cached_tokens 28832.
  5. kv_cache_coordinator.py / single_type_kv_cache_manager.py: the SW manager returns a
     clean miss on the read side and skips caching on the write side, instead of
     asserting (prefix reuse is meaningless for a rolling window anyway). Without the
@@ -154,7 +159,7 @@ Written against vLLM 0.27.1 + this repo's patch set.
                  num_kv_heads=self.num_kv_heads,
 --- a/v1/core/kv_cache_utils.py
 +++ b/v1/core/kv_cache_utils.py
-@@ -656,6 +656,20 @@
+@@ -656,6 +656,21 @@
          else g.kv_cache_spec.block_size
          for g in groups
      ]
@@ -170,12 +175,13 @@ Written against vLLM 0.27.1 + this repo's patch set.
 +    # manager's alignment guard reports a permanent miss and prefix caching
 +    # never hits (#46: int4 geometry -- non-SW gcd 1696, SW block 848).
 +    _hash_gcd_all = math.gcd(*group_block_sizes)
++    _all_group_bs = list(group_block_sizes)
 +    if _non_sw:
 +        group_block_sizes = _non_sw
      scheduler_block_size = math.lcm(*group_block_sizes)
  
      # Block hashes are only consumed by prefix caching and KV connectors
-@@ -668,7 +682,9 @@
+@@ -668,17 +683,29 @@
      # Mamba groups with block_size != cache_config.block_size
      # (mamba_cache_mode != "align") break divisibility; back off to the
      # scheduler block size.
@@ -186,15 +192,28 @@ Written against vLLM 0.27.1 + this repo's patch set.
          isinstance(g.kv_cache_spec, MambaSpec)
          and g.kv_cache_spec.block_size != cache_config.block_size
          for g in groups
-@@ -677,7 +693,7 @@
+     ):
+-        return scheduler_block_size, scheduler_block_size
++        # port(kvarn-v2): the fallback hash unit must still divide the SW
++        # block (#46); scheduler_block_size (the non-SW LCM) need not.
++        logger.info(
++            "kvarn-v2 hash-unit fallback: groups=%s cache_block=%s -> "
++            "scheduler=%d hash=%d", _all_group_bs, cache_config.block_size,
++            scheduler_block_size, _hash_gcd_all)
++        return scheduler_block_size, _hash_gcd_all
  
      requested = cache_config.prefix_match_unit
      hash_block_size = (
 -        requested if requested is not None else math.gcd(*group_block_sizes)
 +        requested if requested is not None else _hash_gcd_all
      )
++    logger.info(
++        "kvarn-v2 hash unit: groups=%s cache_block=%s requested=%s -> "
++        "scheduler=%d hash=%d", _all_group_bs, cache_config.block_size,
++        requested, scheduler_block_size, hash_block_size)
      if any(bs % hash_block_size != 0 for bs in group_block_sizes):
          raise ValueError(
+             f"Invalid prefix_match_unit={hash_block_size}; all KV cache group "
 --- a/v1/core/kv_cache_coordinator.py
 +++ b/v1/core/kv_cache_coordinator.py
 @@ -560,8 +560,13 @@

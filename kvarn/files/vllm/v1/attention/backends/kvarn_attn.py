@@ -1423,10 +1423,15 @@ class KVarNAttentionImpl(AttentionImpl["KVarNMetadata"]):
                    int(getattr(self, "sliding_window", 0) or 0),
                    # (#48) both are compile-relevant: the lookup size is a
                    # constexpr and the block-table width sets a stride
-                   # specialization bucket. At profile time they are 0/small;
-                   # the serving-time _ensure_pool that installs the real
-                   # table re-runs the warmup so the REAL variants compile
-                   # before the first request.
+                   # specialization bucket. HONEST STATUS: the lookup table is
+                   # sized 1024 at profile time and resized to the real cache
+                   # block count by the first serving build, so the re-keyed
+                   # warmup still compiles the real packed-kv variant INSIDE
+                   # request 1 (one flagged compile, ~200 ms; the fused
+                   # kernels real variants come from graph capture and are
+                   # unaffected). Deriving the size from the pinned
+                   # kv_cache_memory config at profile time would close it;
+                   # follow-up, not done here.
                    int(self._block_lookup_size), int(self._max_model_len))
         if dec_key not in cls._kernel_warmed:
             self._warm_decode_kernels(device)
