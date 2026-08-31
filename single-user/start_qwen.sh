@@ -592,5 +592,6 @@ exec venv/bin/vllm serve "$MODEL" \
   "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
+  --enable-prompt-tokens-details \
   ${TOOL_ARGS} \
   ${EXTRA_ARGS}

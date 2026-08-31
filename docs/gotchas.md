@@ -599,3 +599,48 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     And when eviction probing, keep the resend prompt BYTE-identical: a
     two-token label difference shifts every block hash and manufactures a
     convincing, fake "per-request hash instability" (ask how we know).
+
+43. **"Every request re-prefills" is measurable, and the cause is usually the
+    client's bytes, not the cache.** Reported against an agent client in
+    [#47](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/47) (44 s mean
+    TTFT at ~44k context, i.e. a full recompute per turn, while plain chat
+    clients on the same server sat at the documented decode rates). Work the
+    list in order:
+
+    1. **Measure, per request.** The launchers pass
+       `--enable-prompt-tokens-details`, so every response's
+       `usage.prompt_tokens_details.cached_tokens` says how much of that
+       prompt hit. (vLLM never emits DeepSeek's `prompt_cache_hit_tokens`
+       field; this is the equivalent.) Server-side,
+       `vllm:prefix_cache_queries` / `vllm:prefix_cache_hits` on `/metrics`
+       give the same as counters.
+    2. **Know the floor.** Hits are counted in whole hash units and the
+       recurrent state resumes only at aligned boundaries
+       (`--mamba-cache-mode align`), so the hit length truncates DOWN to a
+       multiple of the unit — a prompt shorter than one unit can never hit,
+       and a shared prefix pays up to one unit of recompute past the match.
+       This is a fixed tax, not the 100%-miss failure mode.
+    3. **Byte-identity is over the RENDERED prompt.** What the cache hashes
+       is the chat-templated token stream: system prompt + tool definitions +
+       every message, in order. One changed byte at position P invalidates
+       everything after P. The classic offenders are dynamic content early in
+       the payload: a timestamp or "current status" block in the system
+       prompt, a heartbeat line spliced into the history, compaction that
+       rewrites old turns, tool lists whose order is not stable. Diff two
+       consecutive requests' FULL bodies (not just system + tools — the
+       messages array too) and find the first differing byte; that byte is
+       where your cache hit ends.
+    4. **Interleaving evicts.** A cached prefix on this hybrid model holds
+       KV blocks plus a recurrent-state page (~16% of the pool per request at
+       k=7), and the pool is small. Two conversations round-robining — an
+       agent's heartbeat pinging between chat turns is exactly that — can
+       each evict the other before its recheck: measured as 0-of-3 warm in a
+       3-context round-robin on 24 GB
+       ([docs/wsl2-4090.md](wsl2-4090.md), retention section). The CPU
+       offload tier turns that back into 3-of-3 (a RAM restore instead of a
+       re-prefill).
+    5. **The isolating experiment.** Bypass every proxy and fire the same
+       long prompt twice at bare vLLM: if TTFT collapses on the second call,
+       the server cache is healthy and the variable is the client payload
+       (or a proxy that mutates it); if it does not, look at the server —
+       and at 2 and 4 above.
