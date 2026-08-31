@@ -664,3 +664,32 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     pinned pool holds more tokens at int8's geometry. The default stays
     fp8/FlashInfer: two faults on one box do not justify a 25% tax on every
     other box, but you should know which combination you are running.
+
+45. **On a low-RAM host, don't let the stock loader race page-cache eviction —
+    stream the weights.** A 16 GB host (~10 GiB actually free) died loading the
+    15.9 GiB checkpoint at shard 5/8
+    ([#39](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/39)). Measured
+    here under a 10 GiB cgroup cap standing in for that box: the **stock
+    loader's memory peak was the cap to the byte** (10,737,418,240) — it loads
+    by consuming everything and betting reclaim keeps up, which a fast NVMe
+    wins and a busy desktop loses; pushed past the edge it reclaim-thrashes so
+    hard the process stops responding even to SIGKILL (uninterruptible I/O),
+    which is also what a "hung load" looks like from the outside. The **Run:ai
+    streamer bounds the load instead, and is faster here**: 6.3 s vs 11.7 s to
+    load, 8.46 GB process-wide peak under the same cap (its `memory_limit`
+    caps the staging window; the rest is the engine's ordinary host
+    footprint):
+
+    ```bash
+    venv/bin/pip install runai-model-streamer humanize
+    # NOT runai-model-streamer-s3: it force-imports boto3 at package import
+    # and breaks the loader on a box without it; local files don't need it.
+    EXTRA_ARGS='--load-format=runai_streamer --model-loader-extra-config={"memory_limit":2147483648}' \
+      bash single-user/start_qwen.sh
+    ```
+
+    Two adjacent facts from the same experiment: `swapon` cannot save the
+    stock loader (mmap'd read-only file pages evict, they never swap — only
+    the engine's anonymous memory benefits), and the whole test ran under
+    `SPEC=off`, which as of this entry is a real mode rather than a silent
+    fall-through to mtp.

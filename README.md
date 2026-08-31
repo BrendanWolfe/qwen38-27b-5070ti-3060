@@ -660,7 +660,9 @@ manual venv path is for hacking on the stack, or running it bare-metal.
 > [docs/reproductions/native-3090.md](docs/reproductions/native-3090.md).
 
 You need: a 24 GB Ampere or newer NVIDIA card, a recent driver, Python 3.12,
-~40 GB disk. Everything below is CPU-safe to run while the GPU does other
+~40 GB disk — and if the host has less than ~16 GB of free RAM, load the
+weights with the streamer instead of the stock loader (gotcha 45: the stock
+loader peaks at whatever RAM exists; the streamer is bounded and faster). Everything below is CPU-safe to run while the GPU does other
 things; the container details live in [docs/docker.md](docs/docker.md).
 
 ```bash
