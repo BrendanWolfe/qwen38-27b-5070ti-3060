@@ -31,11 +31,11 @@ list, and `--corpus` counts your own instead. It needs
 ones (they read a shard into RAM whole; the uncensored build ships one 18.6 GB
 `model.safetensors`) and **asymmetric AWQ** bodies (they clone `config_groups.group_0`
 onto the symmetric tensors they write, so vLLM then looks for a `weight_zero_point`
-that does not exist). Same math, same output tensors, peak RSS of a few GB regardless
-of shard size.
+that does not exist). Same math, same output tensors, peak RSS well under the shard
+size (9.7 GB measured on the 18.6 GB example here -- still not a low-RAM tool).
 
 ```bash
-$V prepare/fetch_uncensored.py                          # ~18.6 GB
+$V prepare/fetch_thirdparty.py                          # ~18.6 GB (or: fetch_thirdparty.py <hf-repo>)
 $V prepare/quant_heads_stream.py models/Qwen3.8-27B-Uncensored-W4A16
 $V prepare/build_draft_vocab.py  models/Qwen3.8-27B-Uncensored-W4A16 \
   --ids prepare/draft_vocab_ids.json

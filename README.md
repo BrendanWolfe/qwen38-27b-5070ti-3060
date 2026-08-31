@@ -348,16 +348,32 @@ answer, and 400 tokens of fluent Danish inventing a task the prompt never asked 
 sweeps all 128 residues and judges every answer on how much of the document came
 back, and `bench/verbatim.py` self-tests that rule against all three shapes.
 
-### A different checkpoint: the uncensored build
+### Third-party checkpoints (uncensored builds and others)
 
 `MODEL=` points the launchers at any Qwen3.8-27B checkpoint in the same
-`compressed-tensors` shape. The one verified here is
+`compressed-tensors` shape. Two routes, easiest first.
+
+**Ready-made:**
+[leminkozey/Qwen3.8-27B-Uncensored-W4A16-AutoRound](https://huggingface.co/leminkozey/Qwen3.8-27B-Uncensored-W4A16-AutoRound)
+([#45](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/45)) is an
+abliterated Qwen3.8-27B already quantized with this repo's own recipe —
+AutoRound W4A16 body plus the `prepare/` head requant — so it serves without
+any preparation. Its author measured ~100 tok/s warm at `SPEC=dflash2
+CTX=huge` on a 3090 with coherent output and a 45k-context needle retrieved,
+and a second tester confirmed `SPEC=mtp` works. Community-built and
+community-verified; not benchmarked on this repo's reference box.
+
+**Any other export**, including single-shard and asymmetric-AWQ ones the base
+model's three `quant_*.py` scripts cannot open, goes through the streaming
+requant (contributed in
+[#37](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/37)). The worked
+example is
 [philbert440/Qwen3.8-27B-Uncensored-Aggressive-W4A16-AWQ](https://huggingface.co/philbert440/Qwen3.8-27B-Uncensored-Aggressive-W4A16-AWQ)
 — an abliterated (de-refused) Qwen3.8-27B, W4A16 AWQ, with the vision tower and
 the grafted MTP head both preserved. Prepare it once, then serve it:
 
 ```bash
-venv/bin/python prepare/fetch_uncensored.py          # ~18.6 GB
+venv/bin/python prepare/fetch_thirdparty.py          # ~18.6 GB; or: fetch_thirdparty.py <hf-repo>
 venv/bin/python prepare/quant_heads_stream.py models/Qwen3.8-27B-Uncensored-W4A16
 venv/bin/python prepare/build_draft_vocab.py  models/Qwen3.8-27B-Uncensored-W4A16 \
   --ids prepare/draft_vocab_ids.json
@@ -670,9 +686,10 @@ venv/bin/python prepare/build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound 
 venv/bin/python prepare/fetch_fast_variant.py
 # optional: the W4A16 DFlash2 block drafter (1.2 GB) for SPEC=dflash2 single-user mode
 venv/bin/python prepare/fetch_dflash2.py
-# optional: the uncensored checkpoint instead of the base model (~18.6 GB, its own
-# requant step; serve it with MODEL= -- see "A different checkpoint" above)
-venv/bin/python prepare/fetch_uncensored.py
+# optional: a third-party checkpoint instead of the base model (e.g. the uncensored
+# build, ~18.6 GB, its own requant step; MODEL= serves it -- see "Third-party
+# checkpoints" above)
+venv/bin/python prepare/fetch_thirdparty.py
 venv/bin/python prepare/quant_heads_stream.py models/Qwen3.8-27B-Uncensored-W4A16
 
 # patch vllm (all written against 0.27.1; reapply after upgrades)
