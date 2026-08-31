@@ -184,6 +184,15 @@ One caveat to the "all of it is lossless" paragraph above: the speculation here
 is still exact, but this mode inherits KVarN's 4/2-bit KV cache, which is lossy —
 the same trade `CTX=huge` already makes (deep-needle retrieval passes at 200k).
 
+The WSL2 column's ~20% deficit is a WSL2 tax, not a Windows tax, and leaving
+WSL for native Windows does not recover it: the same contributor ran
+`aivrar/vllm-windows-build` (0.27.1, 18 of 19 patches apply after a CRLF→LF
+pass) on the same box and measured native Windows *slower* than WSL2 — 66.0
+vs 76.2 tok/s across the task mix, a 4.4× longer warm boot, and the same
+WDDM paging behavior underneath ([#25](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/25)).
+The bare-metal column is reachable from a Windows box only by putting Linux
+on the metal.
+
 **On WSL2, every `SPEC=dflash2` profile needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`** —
 not just `CTX=huge`. The drafter's architecture forces vLLM's V2 model runner
 (`_is_dflash2_draft()` in `config/vllm.py`), the V2 runner allocates UVA buffers
