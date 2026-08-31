@@ -1,7 +1,7 @@
 diff --git a/vllm/v1/kv_offload/cpu/gpu_worker.py b/vllm/v1/kv_offload/cpu/gpu_worker.py
 index 40b57ac..0a3471b 100644
---- a/vllm/v1/kv_offload/cpu/gpu_worker.py
-+++ b/vllm/v1/kv_offload/cpu/gpu_worker.py
+--- a/v1/kv_offload/cpu/gpu_worker.py
++++ b/v1/kv_offload/cpu/gpu_worker.py
 @@ -99,7 +99,9 @@ def compute_sub_block_ptrs(
      assert skip_count < blocks_per_chunk
  

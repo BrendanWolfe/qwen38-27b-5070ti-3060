@@ -1,7 +1,7 @@
 diff --git a/vllm/v1/attention/ops/int4_per_token_head.py b/vllm/v1/attention/ops/int4_per_token_head.py
 index 6e8de72..1400469 100644
---- a/vllm/v1/attention/ops/int4_per_token_head.py
-+++ b/vllm/v1/attention/ops/int4_per_token_head.py
+--- a/v1/attention/ops/int4_per_token_head.py
++++ b/v1/attention/ops/int4_per_token_head.py
 @@ -12,6 +12,7 @@ kernel, the RHT transform, and the public ``reshape_and_cache_int4`` /
  
  from __future__ import annotations
@@ -55,8 +55,8 @@ index 6e8de72..1400469 100644
      # but Triton needs a non-null pointer everywhere; reuse ``out`` as
 diff --git a/vllm/v1/attention/ops/triton_unified_attention.py b/vllm/v1/attention/ops/triton_unified_attention.py
 index f4d9ba9..e92cc4c 100644
---- a/vllm/v1/attention/ops/triton_unified_attention.py
-+++ b/vllm/v1/attention/ops/triton_unified_attention.py
+--- a/v1/attention/ops/triton_unified_attention.py
++++ b/v1/attention/ops/triton_unified_attention.py
 @@ -715,6 +715,27 @@ def reduce_segments(
      # sequence len for this particular sequence
      seq_len = tl.load(seq_lens_ptr + seq_idx)
