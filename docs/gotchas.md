@@ -719,3 +719,37 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     fails initialization (batch mode documented the softer version of this —
     bigger chunks shrink the pool; with the pool pinned, the same memory
     comes out of the floor instead).
+
+49. **Align-mode prefix caching periodically drops whole conversations to a
+    0% hit — a geometry lottery plus an inverted eviction order on the one
+    mamba state page that unlocks them.** A hybrid cache hit is the
+    *intersection* of per-group hits, and the mamba group can only resume
+    from a retained state snapshot; without one at or below the attention
+    match (minus one 448-token EAGLE margin with spec decode), a fully
+    cached multi-thousand-token attention prefix reads as a 0% miss and
+    re-prefills from scratch (issue #52, upstream vllm#45238 — the same
+    veto is why `--prefix-match-unit` can make things *worse* with spec
+    decode). Three stock behaviors compose: align mode materializes ~one
+    usable snapshot per turn at the last prefill chunk boundary, and on
+    ~22% of turns (448/2048) it lands inside the EAGLE margin — that is
+    the reported "every 4-5 turns" period; the fallback (the previous
+    turn's snapshot, i.e. the block the hit resumed from) is CoW-released
+    early in the turn; and mid-decode frees put every reusable snapshot at
+    the *front* of the free queue while the attention blocks they unlock
+    sit at the back. Any interleaved traffic evicts the snapshots first,
+    and an unlucky turn with the fallback gone reconciles to 0. Measured
+    (12-turn conversation, two unrelated requests between turns, shrunk
+    pool): 81-91% hits for five turns, then 0% on every turn, TTFT 2.1 s →
+    17-31 s, the coordinator logging a discarded 16,576-token attention
+    match. `patches/mamba-align-checkpoint-order.patch` keeps up to three
+    state blocks per running request per mamba group — the CoW-carried key
+    plus the last written prompt-region snapshots — until request end,
+    freed last. It ships **default off** (measured no-harm at two pool
+    sizes, but the win regime — context comparable to the pool over many
+    turns — is not cheaply reproducible in a short cell); enable with
+    `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` if you see the periodic spikes. Two stronger variants — pinning the snapshots against
+    eviction, bounded or not — measured *worse*: each skipped eviction
+    lands on the conversation's own attention tail instead, which breaks
+    the same hit from the other side. If between-turn traffic exceeds the
+    whole free pool, nothing survives by policy; that regime needs a
+    bigger `KV_MEM`, not a smarter queue.

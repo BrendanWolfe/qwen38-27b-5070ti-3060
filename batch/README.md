@@ -142,6 +142,16 @@ It costs ~14% of the KV pool (223,821 → 193,298 tokens, 1.29x concurrency at 1
 prefix (870 tok/s on the 128 in / 512 out row, i.e. unchanged). Answers are identical; the
 state resume is exact.
 
+One failure mode to know about on mixed workloads (a long-running conversation
+plus unrelated traffic on the same server): a hybrid cache hit needs the mamba
+group's retained state snapshot *and* the attention blocks, and stock vLLM's
+eviction order kills the snapshot first — one lost block and the whole
+conversation re-prefills at 0% hit even though its attention KV is fully
+cached. `patches/mamba-align-checkpoint-order.patch` (in the standard patch
+set, default off) fixes the ordering when enabled with
+`VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`; mechanism, measurements and the
+capacity caveat are in [docs/gotchas.md](../docs/gotchas.md) #49.
+
 ## Setup
 
 Do the [common setup](../README.md#setup) first (venv, model download,
