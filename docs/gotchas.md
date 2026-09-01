@@ -693,3 +693,29 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     the engine's anonymous memory benefits), and the whole test ran under
     `SPEC=off`, which as of this entry is a real mode rather than a silent
     fall-through to mtp.
+
+46. **`vllm bench serve` defaults to `--seed 0`, and with prefix caching that
+    poisons every A/B.** Same seed = same prompts call to call; later calls
+    get partial prefix-cache hits whose size depends on the arm's pool
+    geometry, so the contamination differs *between the configs you are
+    comparing*. Measured: a 16k prefill "at" 4.0 s that cold costs 11.2 s
+    (spec-off arm, big pool) next to a baseline reading 15-20% low. Every
+    random-dataset call needs its own `--seed`; `bench/run_benchmarks.sh`
+    does this now (`SEED_BASE` pins the sequence).
+
+47. **Changing `VLLM_MARLIN_INT8_INCLUDE_RE` can replay a stale AOT-compiled
+    graph.** The layer-select envs are in vLLM's compile hash, but
+    `torch_aot_compile` keeps its own cache; switching the include set can
+    crash at the first forward with a stable-ABI `aten::empty` RuntimeError
+    from a cached inductor artifact. Wipe `~/.cache/vllm/torch_compile_cache`
+    when switching layer sets. Separately, `INT8_LAYERS="mlp|linear_attn"`
+    (int8 GDN + fp16 attention) crashes even from a clean cache — an inductor
+    codegen bug with that mixed set on this torch pin; `mlp` and the full
+    default both compile fine.
+
+48. **`--max-num-batched-tokens` above 2048 does not boot in single-user
+    dflash2 mode.** 4096 and 8192 both inflate the profiled activation peak
+    past the transient floor next to the pinned `KV_MEM` pool: the engine
+    fails initialization (batch mode documented the softer version of this —
+    bigger chunks shrink the pool; with the pool pinned, the same memory
+    comes out of the floor instead).

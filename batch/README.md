@@ -68,17 +68,26 @@ default (int8 tensor cores on the MLP GEMMs):
 | 64k | 1,182 | 1,184 | — | 55 s |
 | 100k | 997 | — | — | 103 s |
 
-W4A16 kernels (single-user mode, or batch mode with `INT8_ACT=` unset) for
-comparison — the int8 path is +50% at 1k, tapering to +25% at 100k as the 16
-attention layers take a bigger share:
+Single-user mode (dflash2 k=15, `PREFIX_CACHE=1`), re-measured 2026-09-01 on
+the **seeded** protocol — `bench/run_benchmarks.sh` now passes a distinct
+`--seed` per call; the unseeded harness this table was first built with let
+the prefix cache partially serve repeated bench prompts, which read one config
+15-20% low and another 3× high, so the old W4A16 rows here are not comparable:
 
-| input length | conc 1 | conc 4 | conc 8-16 | single-request TTFT |
-|---|---|---|---|---|
-| 1k | 1,210 tok/s | 1,215 | 1,213 | 0.85 s |
-| 4k | 1,185 | 1,185 | 1,183 | 3.5 s |
-| 16k | 1,112 | 1,117 | 1,116 | 14.7 s |
-| 64k | 906 | 908 | — | 72 s |
-| 100k | 795 | — | — | 129 s |
+| input length, conc 1 | W4A16 (mode default) | `INT8_ACT=int8` (all linears) |
+|---|---|---|
+| 1k | 1,437 tok/s (TTFT 0.71 s) | **1,845** (0.55 s) |
+| 4k | 1,494 (2.7 s) | **1,937** (2.1 s) |
+| 16k | 1,410 (11.6 s) | **1,791** (9.1 s) |
+| 51k | 1,200 (42.6 s) | **1,423** (35.8 s) |
+
+Decode at C1 is unchanged by the int8 path (122±5 vs 121 tok/s over repeats);
+quality is the documented int8 trade
+([docs/optimizations.md](../docs/optimizations.md), GSM8K 95.0 vs 96.5, PPL
++4.1%). `SPEC=off` and `PREFIX_CACHE=0` each measure ~20% *slower* prefill
+than the dflash2 defaults — the drafter rides the V2 model runner and the
+prefix-cache path is the fast allocation path — so neither is a "lean" prefill
+configuration.
 
 Two things to plan capacity around. First, concurrency does nothing for
 prefill: chunked prefill feeds everything through the same 2,048-token
