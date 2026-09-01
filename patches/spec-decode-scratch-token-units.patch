@@ -1,44 +1,91 @@
 int4 3D scratch: split the sequence policy from the token allocation
 
-The three softmax_segm_* scratch buffers are indexed by QUERY TOKEN but were
-sized by seq_threshold_3D, a SEQUENCE policy. For q=1 decode the units coincide,
-which is why this never bit. With DFlash2 multi-query verify they do not.
+WHAT THIS FIXES, AND WHOSE DEFECT IT IS
 
-Worse, capture-enabled mode snaps that policy threshold to the nearest decode
-capture size, which on this config SHRINKS it 32 -> 8. So every multi-query batch
-of 9..16 tokens silently took the 2D path -- in capture-enabled mode only, i.e.
-the only mode that ships. Measured on an RTX 3090 (sm86), Qwen3.8-27B W4A16:
+This corrects a defect in the multi-query 3D extension WE contributed in #46
+(spec-decode-int4-kv-mq3d.patch, syv-fork fermion 2026-08-27). It is not a
+bug in upstream vLLM. Upstream sizes the three softmax_segm_* scratch buffers
+by seq_threshold_3D -- a SEQUENCE count -- and snaps that threshold to the
+nearest decode capture size when CUDA graphs are on. In upstream that is
+correct, because upstream's own dispatch rule sends every multi-query batch
+to 2D (`or max_seqlen_q > 1`): on the 3D path, tokens == sequences by
+construction, so a buffer sized in sequences holds every token it will see.
+
+Our #46 extension opened the 3D path to multi-query verify batches
+(max_seqlen_q <= 16) for DFlash2, and knew the buffers were token-indexed --
+its own comment says the q=1 equivalence "is what the old num_seqs check
+silently relied on for scratch-buffer capacity". It added a runtime capacity
+CHECK (_capacity_ok) rather than resizing the ALLOCATION. The check made the
+path memory-safe. It also made the failure silent: the extension promised 3D
+for batches up to 16 tokens while the buffers held seq_threshold_3D rows,
+which the capture snap had reduced 32 -> 8 on this config. Every eligible
+batch of 9..16 tokens quietly took the 2D path, in capture-enabled mode --
+the only mode that ships. Nothing logged it.
+
+Found by the gate campaign built to vet this kernel before asking for
+default-on. Measured on an RTX 3090 (sm86), Qwen3.8-27B W4A16, DFlash2:
   capture-enabled  q=9 -> 2D, q_token_capacity_failed
   fully eager      q=9 -> 3D
-Same config, same request. Forcings in both directions confirmed capacity, not
-mode, is the deciding predicate: holding mode fixed and moving only the scratch
-rows flips the result each way.
+Same config, same request. Forcings both ways (hold engine mode fixed, move
+only the scratch rows) flip q=9 in each direction: capacity is the deciding
+predicate; mode is what shrinks the capacity in stock.
 
-This splits the units and derives the capacity from the engine config objects:
-  seq_threshold_3D          SEQUENCES, policy (unchanged; the capture-snap
-                            question is deliberately a separate change)
-  MAX_QUERY_LEN_3D          QUERY TOKENS PER SEQUENCE; one source for both
-                            eligibility and allocation
-  scratch_token_capacity_3d TOTAL QUERY TOKENS, allocation:
+WHAT THIS DOES NOT DO
+
+It does not make anything measurably faster at the default draft depth of 7.
+Ten interleaved boots at 6.7k and 68k context, every number carrying its own
+dispatch census: +0.13% and 0.0%, inside a 0.54% same-config spread. At depth
+7 the ordinary verify batch is 8 tokens, 8 is a capture size that already ran
+3D, and the 9..16 band this fixes is 0.66% of attention calls. The extension's
+headline win was never broken; its edge was. Deeper speculation would put the
+band in the common case, but the drafter checkpoint is trained for 7 and
+depth 11 does not fit this card, so that arm is untested here. This patch
+stands on correctness: the policy and the allocation now agree, and any
+future disagreement is visible instead of silent.
+
+It also does not touch the capture-size snap itself. Which topology an
+already-captured graph replays is a separate change with its own gate.
+
+THE CHANGE
+
+  seq_threshold_3D           SEQUENCES, policy -- unchanged
+  MAX_QUERY_LEN_3D           QUERY TOKENS PER SEQUENCE; one source for both
+                             eligibility and allocation
+  scratch_token_capacity_3d  TOTAL QUERY TOKENS, allocation:
     min(max_num_batched_tokens,
         min(max_num_seqs, seq_threshold_3D) * MAX_QUERY_LEN_3D)
 
-Cost here: 16 rows, 28.22 MiB across 4 live allocations (+14.11 over stock).
-Allocation is per attention-backend instance, NOT per layer (64 layers, 4
-allocations), so no shared workspace is needed at this multiplicity. NOTE: the
-formula scales with max_num_seqs -- at max_num_seqs=32 it is 903 MiB, which
-needs its own performance/VRAM ruling rather than a silent cap. A silent cap
-would recreate exactly the accidental fallback this patch removes.
+derived from the engine's config objects at construction, printed with its
+inputs and byte cost in the boot record. Construction asserts all three
+buffers carry the declared capacity, so an oversized buffer cannot mask an
+undersized sibling. A capacity failure on policy-eligible work marks the
+backend DEGRADED, increments an observable counter (mq3d_breach_state()),
+and emits ONE rate-limited diagnostic with the first specimen; 2D remains
+the safe fallback.
 
-A capacity failure on policy-eligible work marks the backend DEGRADED, increments
-an observable counter (mq3d_breach_state()), and emits ONE rate-limited diagnostic
-carrying the first specimen. Sixteen identical error lines per request are not
-loud, they are floodable, and a flood is how an operator learns to filter the
-message out; the state is the signal, not the log volume. 2D remains the safe
-fallback throughout. The boot record binds the
-capacity, its inputs and its byte cost. Construction asserts all three buffers
-carry the declared capacity, so an oversized buffer cannot mask an undersized
-sibling.
+Cost here: 16 rows, 28.22 MiB across 4 live allocations (+14.11 MiB over
+stock). Allocation is per attention-backend instance, not per layer (64
+layers, 4 allocations). The formula scales with max_num_seqs -- 903 MiB at
+32 -- and that is stated rather than silently capped, because a silent cap
+would recreate exactly the accidental fallback this removes.
+
+VERIFICATION
+
+  property test    238,276 policy-eligible batches over 4,032 config tuples,
+                   0 violations; the pre-fix formula fails it 129,498 times
+  operator oracle  9/9 rows incl. [17] vs [16,1] (both total 17: the first
+                   rejects on POLICY, the second is ADMITTED), padded
+                   zero-length row, over-capacity breach; independent fp32
+                   reference; mutating back to sequence units breaches every
+                   multi-query row and leaves exactly q=1 and [17] green --
+                   the defect's own signature. Built and run by a second seat
+                   that did not write this patch.
+  live             max_num_seqs=8: tokens=64 across 8 sequences dispatches 3D
+  mutation         rows back to sequence units refuses boot at the assert;
+                   declared capacity shrunk to 8 -> q=9 red, count exact
+                   (first=1, final=16), one diagnostic
+  CI order         applies clean on the stock 0.27.1 wheel with all 27
+                   patches in Dockerfile glob order (0 failed, 0 fuzzy)
 
 ---
 
