@@ -265,35 +265,6 @@ sibling.
          or is_batch_invariant
      )
 +
-+    # The reason bit: which predicate said no. Kept because "it fell back" was the whole
-+    # defect -- the seq-vs-token bug was invisible for as long as the fallback had no
-+    # stated cause. Off unless explicitly enabled.
-+    if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
-+        _why = []
-+        if seq_threshold_3D is None: _why.append("no_seq_threshold")
-+        if num_par_softmax_segments is None: _why.append("no_segments")
-+        if not _scratch_present: _why.append("scratch_absent")
-+        if _mq and not _mq_3d_enabled: _why.append("mq_but_flag_off")
-+        if _mq and not _qlen_ok: _why.append(f"max_query_len_policy>{_qlen_cap}")
-+        if _mq and _mq_3d_enabled and _qlen_ok and not _buffers_agree:
-+            _why.append("buffers_disagree_with_declared_capacity")
-+        if _mq and _mq_3d_enabled and _qlen_ok and _buffers_agree and not _capacity_ok:
-+            _why.append("q_token_capacity_failed")
-+        if seq_threshold_3D is not None and num_seqs > seq_threshold_3D:
-+            _why.append("num_seqs_threshold_failed")
-+        if is_batch_invariant: _why.append("batch_invariant_guard")
-+        print(
-+            f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
-+            f"max_seqlen_q={max_seqlen_q} use_3d={use_3d} "
-+            f"declared_capacity={scratch_token_capacity_3d} "
-+            f"qlen_cap={_qlen_cap} seq_threshold_3D={seq_threshold_3D} "
-+            f"rows={None if softmax_segm_output is None else softmax_segm_output.shape[0]} "
-+            f"| breach_count={MQ3D_CAPACITY_BREACH['count']} "
-+            f"degraded={MQ3D_CAPACITY_BREACH['degraded']} "
-+            f"| reasons={','.join(_why) if _why else 'NONE(3d eligible)'}",
-+            flush=True,
-+        )
-+
 +    # A capacity failure on work the POLICY declared eligible is an internal invariant
 +    # breach, not a runtime condition: capacity is sized so this cannot happen. 2D is
 +    # still the correct and safe fallback, so we do not raise -- but silence here is
@@ -325,6 +296,35 @@ sibling.
 +                "runtime condition; further breaches increment the counter silently.",
 +                _specimen,
 +            )
++    # The reason bit: which predicate said no. Kept because "it fell back" was the whole
++    # defect -- the seq-vs-token bug was invisible for as long as the fallback had no
++    # stated cause. Off unless explicitly enabled.
++    if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
++        _why = []
++        if seq_threshold_3D is None: _why.append("no_seq_threshold")
++        if num_par_softmax_segments is None: _why.append("no_segments")
++        if not _scratch_present: _why.append("scratch_absent")
++        if _mq and not _mq_3d_enabled: _why.append("mq_but_flag_off")
++        if _mq and not _qlen_ok: _why.append(f"max_query_len_policy>{_qlen_cap}")
++        if _mq and _mq_3d_enabled and _qlen_ok and not _buffers_agree:
++            _why.append("buffers_disagree_with_declared_capacity")
++        if _mq and _mq_3d_enabled and _qlen_ok and _buffers_agree and not _capacity_ok:
++            _why.append("q_token_capacity_failed")
++        if seq_threshold_3D is not None and num_seqs > seq_threshold_3D:
++            _why.append("num_seqs_threshold_failed")
++        if is_batch_invariant: _why.append("batch_invariant_guard")
++        print(
++            f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
++            f"max_seqlen_q={max_seqlen_q} use_3d={use_3d} "
++            f"declared_capacity={scratch_token_capacity_3d} "
++            f"qlen_cap={_qlen_cap} seq_threshold_3D={seq_threshold_3D} "
++            f"rows={None if softmax_segm_output is None else softmax_segm_output.shape[0]} "
++            f"| breach_count={MQ3D_CAPACITY_BREACH['count']} "
++            f"degraded={MQ3D_CAPACITY_BREACH['degraded']} "
++            f"| reasons={','.join(_why) if _why else 'NONE(3d eligible)'}",
++            flush=True,
++        )
++
      if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
          print(
              f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
