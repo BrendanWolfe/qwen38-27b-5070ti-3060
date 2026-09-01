@@ -105,6 +105,14 @@ INT8_ACT=${INT8_ACT-}
 INT8_LAYERS=${INT8_LAYERS-mlp|linear_attn|self_attn}
 [ -n "$INT8_ACT" ] && export VLLM_MARLIN_INPUT_DTYPE=$INT8_ACT
 [ -n "$INT8_ACT" ] && [ -n "$INT8_LAYERS" ] && export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
+# PREFILL_ATTN=int8: int8-QK Triton attention for the hd256 full-attention
+# layers during prefill (patches/prefill-attn-int8.patch): 1.27-1.35x FA2 on
+# the attention itself, worth up to ~+5% end-to-end at 51k on top of INT8_ACT
+# (1,839/1,498 tok/s at 16k/51k with both on). Prefill-only; decode and the
+# split-KV verify keep their existing paths. fp16 selects the same kernel
+# without quantization (a debugging mode); empty keeps FA2.
+PREFILL_ATTN=${PREFILL_ATTN-}
+[ -n "$PREFILL_ATTN" ] && export VLLM_PREFILL_ATTN=$PREFILL_ATTN
 # 0.93 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
 # path allocates beyond the startup memory profile (docs/gotchas.md, gotcha 4).
 GPU_UTIL=${GPU_UTIL:-0.93}

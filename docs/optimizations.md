@@ -141,6 +141,20 @@ full-attention layers grow quadratically to ~40% of prefill there, and FA2 at
 head_dim 256 has no faster sm86 alternative (FlashInfer measured within 1.5%,
 and it costs the split-KV verify path at decode).
 
+**int8-QK prefill attention** (`PREFILL_ATTN=int8`,
+`patches/prefill-attn-int8.patch`) attacks what is left after the GEMMs: the
+16 full-attention layers, whose head_dim of 256 pins FA2 at 54-57 TFLOPS on
+sm86 (85% of the card's practical fp16 mma rate — no fp16 rewrite can win).
+A Triton kernel runs QK^T on int8 tensor cores at 2x the fp16 rate,
+SageAttention-style: K is smoothed by its per-head channel mean (softmax-
+invariant, so exact up to int8 rounding — cos > 0.99999 vs fp32 at 4-51k),
+gathered and quantized once per layer-chunk into contiguous int8 scratch;
+Q rows carry per-row scales; P.V stays bf16. On the attention itself it is
+1.27x FA2 at 4k rising to 1.35x at 51k; end-to-end with `INT8_ACT` it adds
++2.7% at 16k and +5.3% at 51k (1,839 / 1,498 tok/s), decode unchanged.
+Prefill-only by construction: the branch fires for single-request prefill
+chunks on the exact serving geometry and falls through to FA2 otherwise.
+
 Things this campaign measured that did NOT pay, so nobody re-walks them:
 
 - **The benchmark harness was mismeasuring prefill.** `vllm bench serve`
