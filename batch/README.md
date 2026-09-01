@@ -97,6 +97,33 @@ waits ~40 s). Second, the falloff with length is mild — ~45% from 1k to 100k
 on the int8 path, ~34% on W4A16 — because just 16 of 64 layers pay quadratic
 attention; this is one of the places the hybrid architecture genuinely helps.
 
+### Raw-engine cells (no speculation, no prefix caching)
+
+For apples-to-apples comparison with other 3090 stacks, the standard "raw"
+protocol people ask for: `SPEC=off PREFIX_CACHE=0`, 7,681-token prompts,
+511-token generations (8,192 tokens resident per request), C simultaneous
+requests, distinct seeds per call. PP = total prompt tokens / wall time of
+1-token-output runs at the same concurrency; TG = C × 1000 / mean TPOT
+(true tokens per second — with speculation off every round emits exactly one
+token per request). RTX 3090 at 250 W, this checkpoint (W4A16-AutoRound-fast).
+
+| cell | W4A16 raw: PP / TG-agg | + server-side int8 (`INT8_ACT=int8 PREFILL_ATTN=int8`): PP / TG-agg |
+|---|---|---|
+| C1 | 1,172 / 46.9 tok/s | **1,849** / 45.2 |
+| C4 | 1,168 / 94.8 | **1,858** / 110.1 |
+| C8 | 1,169 / 111.5 | **1,911** / 143.7 |
+
+PP is flat in C because chunked prefill feeds every request through the same
+per-step token budget. The int8 column is still "raw" by the usual definition
+— no draft model, no cache reuse — it is a server-side kernel choice, the
+same class of decision as picking a weight quant. A sanity check for anyone
+comparing TG numbers: at true spec-off, `TG per stream x round latency = 1`
+token per round. A C1 cell reporting ~110 TG at a ~45 ms round is emitting
+~5 tokens per round — that is a speculative path still active (this repo's
+own `SPEC=off` used to silently fall through to MTP; see the launcher
+comment), not raw decode. Raw single-stream decode for 16 GB of weights on a
+936 GB/s card is bounded near ~50 tok/s.
+
 ## Shared prompts: `PREFIX_CACHE=1`
 
 If every request carries the same system prompt, few-shot block or document — the normal
