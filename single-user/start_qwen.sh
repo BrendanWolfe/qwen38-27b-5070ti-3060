@@ -106,7 +106,7 @@ INT8_LAYERS=${INT8_LAYERS-mlp|linear_attn|self_attn}
 [ -n "$INT8_ACT" ] && export VLLM_MARLIN_INPUT_DTYPE=$INT8_ACT
 [ -n "$INT8_ACT" ] && [ -n "$INT8_LAYERS" ] && export VLLM_MARLIN_INT8_INCLUDE_RE=$INT8_LAYERS
 # PREFILL_ATTN=int8: int8-QK Triton attention for the hd256 full-attention
-# layers during prefill (patches/prefill-attn-int8.patch): 1.27-1.35x FA2 on
+# layers during prefill (patches/triton-prefill-attn-int8.patch): 1.27-1.35x FA2 on
 # the attention itself, worth up to ~+5% end-to-end at 51k on top of INT8_ACT
 # (1,839/1,498 tok/s at 16k/51k with both on). Prefill-only; decode and the
 # split-KV verify keep their existing paths. fp16 selects the same kernel
