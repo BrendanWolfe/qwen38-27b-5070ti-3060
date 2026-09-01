@@ -694,6 +694,17 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `SPEC=off`, which as of this entry is a real mode rather than a silent
     fall-through to mtp.
 
+    Two more from the #39 reporter's own box, once the loader was solved:
+    `memory_limit` sized at or above the checkpoint's largest single tensor is
+    the conservative setting (the bf16 `embed_tokens` is 2,542,796,800 bytes on
+    both variants; the 2 GiB above loaded fine on the reference box, 2542796800
+    is what they settled on) — and the *next* failure on a 24 GB card was not
+    RAM at all: the plain `-W4A16-AutoRound` checkpoint leaves only 1.56 GiB for
+    KV at `GPU_UTIL=0.93`, which cannot hold the 64k default (`max seq len
+    65536 ... 4.76 GiB KV cache is needed`). The `-fast` variant (int4 lm_head
+    and MTP head, `prepare/fetch_fast_variant.py`) is the launcher default for
+    exactly that reason; with it the same box came up at a 72k-token pool.
+
 46. **`vllm bench serve` defaults to `--seed 0`, and with prefix caching that
     poisons every A/B.** Same seed = same prompts call to call; later calls
     get partial prefix-cache hits whose size depends on the arm's pool
@@ -753,3 +764,36 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     the same hit from the other side. If between-turn traffic exceeds the
     whole free pool, nothing survives by policy; that regime needs a
     bigger `KV_MEM`, not a smarter queue.
+
+50. **First-request Triton compiles on a fresh boot came from four separate
+    warmup gaps, and the last one is invisible without logging what Triton
+    specialises on.** Issue #48's fingerprint — a stall in the first large
+    chunked prefill after boot, preceded by `jit_monitor` warnings — had, on
+    the reference 3090 (`SPEC=dflash2 CTX=huge`, one 30k-token first
+    request), four kernels compiling inside request 1, each with its own
+    cause: (1) `_prepare_dflash_inputs_kernel`'s `BLOCK_SIZE` ladder only
+    reaches 256 on a large prefill continuation, never in decode-shaped
+    dummies (`patches/dflash2-prewarm.patch` compiles every rung at boot);
+    (2) the rejection sampler's three kernels are upstream vLLM's and never
+    run in the profile-time dummy sampler pass, which has no draft tokens
+    (`patches/spec-sampler-prewarm.patch` runs one spec-shaped verify in
+    `kernel_warmup()`); (3) KVarN's block→slot lookup was sized to a 1024
+    floor at profile time and resized by the first serving build, and its
+    size is a kernel constexpr (`NUM_BLOCKS_LOOKUP`) — now derived once at
+    impl construction from the KV budget as an upper bound (48,934 slots for
+    6,103 real blocks; the kernels bound-check, so over-sizing is free); and
+    (4) the one that survived all of the above: Triton specialises *integer*
+    arguments on divisibility by 16, and the block table's row stride is its
+    width — the warmup's `cdiv(max_model_len, group)` = 1920 carries the
+    attribute, the runner's real table is 1921 wide and does not, so the two
+    launches were different compiled variants however faithfully the shapes
+    were mirrored. `stride_bt_b` joined `MAX_BLOCKS_PER_REQ` in the kernel's
+    `do_not_specialize`. Measured after all four: **zero** `JIT compilation
+    during inference` lines on the same boot and request. The tool that
+    found (4): `KVARN_SPEC_DEBUG=1` logs pointer alignment and integer
+    divisibility / equal-to-1 for the warmup launch and the first real
+    launches of the packed-kv kernel — diff the two lines.
+    `--jit-monitor-verbose` prints the signature of each in-request compile
+    but truncates the specialisation attributes at 120 characters, which is
+    why it could name the kernel and not the cause. `KVARN_LOOKUP_BLOCKS`
+    pins the lookup size if a deployment ever needs to.

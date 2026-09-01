@@ -538,6 +538,14 @@ ASYNC_ARGS=$([ "${ASYNC_SCHED:-1}" = 1 ] && echo --async-scheduling || echo --no
 TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
 TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
 
+# REQ_METRICS=1: per-request timing fields in every response plus usage on
+# every request (--enable-per-request-metrics --enable-force-include-usage,
+# issue #51; llama-swap reads them). Off by default only because the timing
+# fields ride on the engine-stats path, so it cannot be paired with
+# --disable-log-stats in EXTRA_ARGS. --enable-prompt-tokens-details is always
+# on. vLLM's per-request *spec-decode* summary flag is nightly-only (not 0.27.1).
+METRICS_ARGS=$([ "${REQ_METRICS:-0}" = 1 ] && echo --enable-per-request-metrics --enable-force-include-usage)
+
 # Vision. --language-model-only drops the vision tower cleanly -- no weights loaded,
 # 0.858 GiB on this checkpoint (gotcha 9) -- and stays the default. VISION=1 keeps
 # the tower, for a client that sends images: screenshots into a coding assistant,
@@ -642,5 +650,6 @@ exec venv/bin/vllm serve "$MODEL" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
+  ${METRICS_ARGS} \
   ${TOOL_ARGS} \
   ${EXTRA_ARGS}
