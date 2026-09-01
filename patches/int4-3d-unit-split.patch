@@ -30,8 +30,12 @@ formula scales with max_num_seqs -- at max_num_seqs=32 it is 903 MiB, which
 needs its own performance/VRAM ruling rather than a silent cap. A silent cap
 would recreate exactly the accidental fallback this patch removes.
 
-A capacity failure on policy-eligible work is now logged as an internal
-invariant breach (2D remains the safe fallback), and the boot record binds the
+A capacity failure on policy-eligible work marks the backend DEGRADED, increments
+an observable counter (mq3d_breach_state()), and emits ONE rate-limited diagnostic
+carrying the first specimen. Sixteen identical error lines per request are not
+loud, they are floodable, and a flood is how an operator learns to filter the
+message out; the state is the signal, not the log volume. 2D remains the safe
+fallback throughout. The boot record binds the
 capacity, its inputs and its byte cost. Construction asserts all three buffers
 carry the declared capacity, so an oversized buffer cannot mask an undersized
 sibling.
@@ -173,7 +177,7 @@ sibling.
              softmax_segm_max=softmax_segm_max,
 --- a/v1/attention/ops/int4_per_token_head.py
 +++ b/v1/attention/ops/int4_per_token_head.py
-@@ -13,6 +13,10 @@
+@@ -13,6 +13,29 @@
  from __future__ import annotations
  
  import os
@@ -181,10 +185,29 @@ sibling.
 +from vllm.logger import init_logger
 +
 +logger = init_logger(__name__)
++
++# Observable breach state for the int4 3D scratch capacity invariant.
++# Sixteen identical error lines per request are not loud, they are floodable -- and a
++# flood is how an operator learns to filter the message out. So: a durable counter, a
++# DEGRADED marker, and exactly ONE diagnostic carrying the first specimen. Tests assert
++# the counter and the state, not the logger call, because a repaired log line can still
++# fail silently at operator level.
++MQ3D_CAPACITY_BREACH = {
++    "count": 0,          # total policy-eligible batches that exceeded declared capacity
++    "degraded": False,   # sticky: the derived capacity is wrong for this configuration
++    "first": None,       # the first specimen, kept for diagnosis
++}
++
++
++def mq3d_breach_state():
++    """Read the int4 3D capacity-breach state. Non-zero count means the derived
++    scratch capacity is too small for work the policy declared eligible: correctness
++    is preserved by the 2D fallback, performance is not."""
++    return dict(MQ3D_CAPACITY_BREACH)
  from typing import Any
  
  import torch
-@@ -694,6 +698,8 @@
+@@ -694,6 +717,8 @@
      k_scale_cache,
      v_scale_cache,
      seq_threshold_3D,
@@ -193,7 +216,7 @@ sibling.
      num_par_softmax_segments,
      softmax_segm_output,
      softmax_segm_max,
-@@ -752,10 +758,33 @@
+@@ -752,10 +777,33 @@
      # buffers directly. Opt-in via VLLM_INT4_MQ_3D=1 (promotion gates open).
      _mq = max_seqlen_q > 1
      _mq_3d_enabled = os.environ.get("VLLM_INT4_MQ_3D", "0") == "1"
@@ -228,7 +251,7 @@ sibling.
          and q.shape[0] <= softmax_segm_output.shape[0]
          and q.shape[0] <= softmax_segm_max.shape[0]
          and q.shape[0] <= softmax_segm_expsum.shape[0]
-@@ -763,13 +792,56 @@
+@@ -763,13 +811,72 @@
      use_3d = not (
          seq_threshold_3D is None
          or num_par_softmax_segments is None
@@ -265,6 +288,8 @@ sibling.
 +            f"declared_capacity={scratch_token_capacity_3d} "
 +            f"qlen_cap={_qlen_cap} seq_threshold_3D={seq_threshold_3D} "
 +            f"rows={None if softmax_segm_output is None else softmax_segm_output.shape[0]} "
++            f"| breach_count={MQ3D_CAPACITY_BREACH['count']} "
++            f"degraded={MQ3D_CAPACITY_BREACH['degraded']} "
 +            f"| reasons={','.join(_why) if _why else 'NONE(3d eligible)'}",
 +            flush=True,
 +        )
@@ -276,20 +301,34 @@ sibling.
 +    # names the numbers that disagree. Query lengths above the policy cap are NOT this:
 +    # they are rejected by policy first and never reach the capacity question.
 +    if _mq and _mq_3d_enabled and _qlen_ok and not _capacity_ok:
-+        logger.error(
-+            "int4 3D INTERNAL INVARIANT BREACH: policy-eligible batch "
-+            "(max_seqlen_q=%d <= %d, num_seqs=%d) exceeded declared scratch capacity "
-+            "(tokens=%d, declared=%s, buffer rows=%s/%s/%s). Falling back to 2D, which "
-+            "is safe but slower; the declared capacity is wrong.",
-+            max_seqlen_q, _qlen_cap, num_seqs, q.shape[0], _declared,
-+            None if softmax_segm_output is None else softmax_segm_output.shape[0],
-+            None if softmax_segm_max is None else softmax_segm_max.shape[0],
-+            None if softmax_segm_expsum is None else softmax_segm_expsum.shape[0],
-+        )
++        _specimen = {
++            "max_seqlen_q": int(max_seqlen_q),
++            "qlen_cap": int(_qlen_cap),
++            "num_seqs": int(num_seqs),
++            "tokens": int(q.shape[0]),
++            "declared": _declared,
++            "rows": [
++                None if t is None else int(t.shape[0])
++                for t in (softmax_segm_output, softmax_segm_max, softmax_segm_expsum)
++            ],
++        }
++        MQ3D_CAPACITY_BREACH["count"] += 1
++        if not MQ3D_CAPACITY_BREACH["degraded"]:
++            MQ3D_CAPACITY_BREACH["degraded"] = True
++            MQ3D_CAPACITY_BREACH["first"] = _specimen
++            # ONE diagnostic, with the first specimen. Subsequent breaches only move
++            # the counter -- the state is the signal, not the log volume.
++            logger.error(
++                "int4 3D DEGRADED: derived scratch capacity is too small for "
++                "policy-eligible work. First specimen: %s. Falling back to 2D, which is "
++                "correct but slower. This is a configuration/derivation defect, not a "
++                "runtime condition; further breaches increment the counter silently.",
++                _specimen,
++            )
      if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
          print(
              f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
-@@ -938,6 +1010,8 @@
+@@ -938,6 +1045,8 @@
      k_scale_cache: torch.Tensor,
      v_scale_cache: torch.Tensor,
      seq_threshold_3D: int | None = None,
@@ -298,7 +337,7 @@ sibling.
      num_par_softmax_segments: int | None = None,
      softmax_segm_output: torch.Tensor | None = None,
      softmax_segm_max: torch.Tensor | None = None,
-@@ -977,6 +1051,8 @@
+@@ -977,6 +1086,8 @@
          k_scale_cache=k_scale_cache,
          v_scale_cache=v_scale_cache,
          seq_threshold_3D=seq_threshold_3D,
