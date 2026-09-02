@@ -40,7 +40,9 @@ import torch
 DEV = torch.device("cuda:0")
 torch.manual_seed(0)
 
-VLLM_ROOT = "/app/venv/lib/python3.12/site-packages/vllm"
+# Resolve the installed vllm package; VLLM_ROOT overrides. (The original hardcoded a
+# container venv path.)
+VLLM_ROOT = os.environ.get("VLLM_ROOT") or os.path.dirname(__import__("vllm").__file__)
 # Verdicts are written beside this script by default; ORACLE_OUT overrides. (The original
 # ran in a container and wrote to /work, which does not exist on a native checkout.)
 OUT_PATH = os.environ.get(
@@ -64,7 +66,9 @@ PROVENANCE = {
             "v1/attention/ops/triton_unified_attention.py",
         )
     },
-    "patch_sha256": sha256("/work/int4-3d-unit-split.patch"),
+    "patch_sha256": sha256(os.environ.get("ORACLE_PATCH", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "patches",
+        "spec-decode-scratch-token-units.patch"))),
 }
 
 # ---------------------------------------------------------------- prod imports
