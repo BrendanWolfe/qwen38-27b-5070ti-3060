@@ -9,3 +9,4 @@ venv/
 drafter/data/
 drafter/runs/
 .env
+.qwen-*-boot.*

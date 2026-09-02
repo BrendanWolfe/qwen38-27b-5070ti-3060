@@ -125,35 +125,24 @@ for p in patches/*.patch; do
 done
 ```
 
-This loop applies all 24 patches in filename order — including the five this
-fork adds. Order matters, which is why the DFlash2 one is named
-`zz-dflash2-pipeline-parallel.patch`: it must be last because it edits files
-earlier patches also touch. `vllm-pr46994-mtp-pp.patch` (MTP + pipeline
-parallelism) uses the same conventional paths as the rest, so it applies in
-the loop too.
+This loop applies all 32 standard patches in filename order, including the
+five PP-specific patches carried by this fork. Order matters: the `zz*` names
+keep the local DFlash2/PP compatibility fixes after the upstream DFlash2
+patches they extend. KVarN's three-stage install is separate and comes next.
 
-Six of those arrived from upstream in the 2026-08-26 merge and all six apply
-cleanly on top of this fork's stack (verified by dry-run against a fully
-patched tree). Two of them do nothing on this hardware and are carried only so
-`verify.sh` and upstream stay in step: `marlin-repack-staged-sm80.patch`
-defaults on for compute capability **8.0 exactly** (this pair is sm120 and
-sm86), and `offload-dflash-eagle-groups.patch` fixes the OffloadingConnector,
-which no profile here enables. The other four are live:
-`xgrammar-spec-terminated.patch` (tool calls were returning HTTP errors for
-valid output when a verify window ran past the grammar's end — every profile
-here ships `--enable-auto-tool-choice`), `vision-tower-cpu-offload.patch`
-(`VISION_OFFLOAD`, below), `int4-kv-per-token-head.patch` (unblocks
-`KV=int4pth` under `SPEC=dflash2`; `KV=int4pth` under MTP is unchanged, since
-the padded-page branch it adds only fires when a promoted drafter layer pads
-the pages) and `dflash2-ngram-chains.patch` (`CHAIN=1`, off by default).
+The 2026-09-02 upstream sync adds eight patches. The DFlash input and rejection
+sampler prewarm patches apply automatically; the int4 MQ3D scratch-unit fix is
+also unconditional and makes the opt-in `INT4_MQ_3D=1` path safe. The remaining
+performance/retention paths stay opt-in on this pair: `PREFILL_ATTN=int8`,
+`MAMBA_KEEP_CHECKPOINTS=1`, and `INT4_MQ_3D=1`. The Marlin tuning bridge needs
+an external locally built extension, while the WSL device-pointer fix is inert
+on native Linux. See the sync accounting in `heterogeneous/README.md` before
+promoting any of these based on one-card 3090 numbers.
 
-`dflash2-ngram-chains.patch` needed a fifth fork patch to be usable at all:
-`zzzz-dflash2-chain-pp-propose.patch`. Its `propose()` override drops the
-`intermediate_tensors` parameter this fork's PP patch adds to the base method,
-so **both DFlash2 profiles died in warmup** — with `CHAIN=0` as readily as
-`CHAIN=1` — after a boot that looked healthy through KV sizing and graph
-capture. `zzzz-` sorts after both the patch that creates the override and the
-one that creates the conflict.
+`dflash2-ngram-chains.patch` still needs the local
+`zzzz-dflash2-chain-pp-propose.patch`: upstream's override otherwise drops the
+`intermediate_tensors` argument required by this fork's pipeline relay and both
+DFlash2 profiles fail in warmup even with `CHAIN=0`.
 
 ## 5. Verify the install
 
@@ -198,7 +187,10 @@ bash heterogeneous/start_qwen_batch.sh
 - Expected: **74–75 tok/s** single-stream on realistic prompts (an earlier
   repeated-512-token measurement read 84; both are in
   [README.md](README.md)), and an FP8 KV pool of at least 147,456 tokens —
-  often more after the exact compile shape is warm (gotcha 43). Keep it in a `tmux` session or a systemd unit for long runs.
+  often more after the exact compile shape is warm (gotcha 51). The new
+  prewarm patches reduce first-request JIT work but do not remove that cold
+  memory-profile accounting issue. Keep it in a `tmux` session or a systemd
+  unit for long runs.
 
 ### DFlash2 batch profile (four scheduler seats)
 

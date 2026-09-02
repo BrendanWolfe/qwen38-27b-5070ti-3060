@@ -87,7 +87,7 @@ case " ${EXTRA_ARGS:-} " in *"--tensor-parallel-size"*|*" -tp "*)
 # profiles and it is also why their pins do not transfer between profiles: a pin
 # skips memory profiling entirely, so passing its sizing check says nothing about
 # whether either rank still has room for graph capture, prefill workspaces and
-# NCCL (gotcha 44 -- three configurations booted, reported a healthy pool, served
+# NCCL (gotcha 52 -- three configurations booted, reported a healthy pool, served
 # /health 200 and then died). 2,800,000,000 is the largest pin validated here,
 # and only at MAX_SEQS=1.
 KV_PIN=$(printf %s " ${EXTRA_ARGS:-} " | sed -En "s/.*--kv-cache-memory[= ]([0-9]+).*/\1/p")
@@ -95,7 +95,7 @@ if [ -n "$KV_PIN" ] && [ "$KV_PIN" -gt 2800000000 ]; then
   echo "WARNING: --kv-cache-memory=$KV_PIN is above the largest pin validated on this" \
        "pair (2,800,000,000, at one seat). The pin is per PP rank, and the extra pool" \
        "comes out of the headroom each rank needs AFTER sizing succeeds. Validate with" \
-       "a real long prompt followed by /health, not with a clean boot (gotcha 44)." >&2
+       "a real long prompt followed by /health, not with a clean boot (gotcha 52)." >&2
 fi
 
 if [ "$KV" = "bf16" ]; then
@@ -181,11 +181,11 @@ ASYNC_ARGS=$([ "$ASYNC_SCHED" = "1" ] && echo --async-scheduling || echo --no-as
 # first concurrent batch with torch.OutOfMemoryError inside the engine
 # (docs/gotchas.md, gotcha 38). Past the cap the oversized batches run piecewise
 # instead of not at all. Set CG explicitly to override.
-SPEC_ARGS=""
+SPEC_ARGS=()
 if [ "$SPEC" = "mtp" ]; then
   # PR #46994 implements MTP+PP on the V2 model runner.
   export VLLM_USE_V2_MODEL_RUNNER=1
-  SPEC_ARGS="--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
+  SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}")
   CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1) > 64 ? 64 : MAX_SEQS * (DRAFT_TOKENS + 1)))}
 elif [ "$SPEC" = "dflash2" ]; then
   export VLLM_USE_V2_MODEL_RUNNER=1
@@ -206,7 +206,7 @@ elif [ "$SPEC" = "dflash2" ]; then
   # is worth trying here specifically, and one reason to be careful:
   #   - this box is bandwidth-bound, and a skipped drafter forward is skipped weight
   #     traffic, which is the quantity that sets step time here;
-  #   - the drafter sits on the LAST pipeline rank (gotcha 44), so on a chain step
+  #   - the drafter sits on the LAST pipeline rank (gotcha 52), so on a chain step
   #     that rank's work disappears rather than being merely cheaper.
   #   - but the chain needs a single request in the batch, so it can only engage on
   #     the solo profiles (MAX_SEQS=1) -- at MAX_SEQS=4 the batch DFlash2 profile
@@ -235,11 +235,32 @@ elif [ "$SPEC" = "dflash2" ]; then
   # target-model compilation and CUDA graphs remain enabled.
   export VLLM_DFLASH_CUDAGRAPH=${VLLM_DFLASH_CUDAGRAPH:-0}
   export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((DRAFT_TOKENS + 1))}
-  SPEC_ARGS="--speculative-config {\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
+  SPEC_ARGS=(--speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}")
   CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1) > 64 ? 64 : MAX_SEQS * (DRAFT_TOKENS + 1)))}
-else
+elif [ "$SPEC" = "off" ] || [ "$SPEC" = "none" ]; then
   CG=${CG:-$MAX_SEQS}
+else
+  echo "SPEC=$SPEC is not a mode: mtp (default), dflash2, off/none." >&2
+  echo "Refusing instead of silently running a non-speculative A/B." >&2
+  exit 1
 fi
+
+# Friendly aliases for three upstream advances, all opt-in until they have
+# measurements on this mixed sm120/sm86 pipeline:
+#
+# - PREFILL_ATTN=int8 selects the new int8-QK Triton kernel for single-request
+#   BF16 prefill. It was tuned on sm86 and falls through unless the exact
+#   Qwen3.8 geometry and BF16 KV are present, so it is most relevant to manual
+#   KV=bf16 DFlash2 runs; it does nothing to the shipped FP8/KVarN profiles.
+# - MAMBA_KEEP_CHECKPOINTS=1 retains reachable align-mode state snapshots until
+#   request end, addressing periodic 0%-hit turns under interleaved traffic.
+# - INT4_MQ_3D=1 enables the upstream fork's split-KV 3D path for DFlash2 with
+#   KV=int4pth. The accompanying token-unit scratch fix makes q=9..16 safe, but
+#   the speed and memory trade are not yet measured across both cards.
+[ -n "${PREFILL_ATTN:-}" ] && export VLLM_PREFILL_ATTN="$PREFILL_ATTN"
+[ -n "${MAMBA_KEEP_CHECKPOINTS:-}" ] && \
+  export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS="$MAMBA_KEEP_CHECKPOINTS"
+[ -n "${INT4_MQ_3D:-}" ] && export VLLM_INT4_MQ_3D="$INT4_MQ_3D"
 
 # An explicit CUDAGRAPH_MODE is honoured on every path. Unlike upstream these
 # profiles never pin the capture mode: the residue bug that PIECEWISE works
@@ -321,7 +342,7 @@ if [ "${VISION:-0}" = 1 ]; then
   # binds the KV pool -- stops landing there, and 8.5 MiB of patch/pos embedding stays
   # resident so visual.device still reports cuda. Default ON here for the same reason
   # upstream defaults it on, and with more force: both cards are smaller than the 24 GiB
-  # it was measured on, and gotcha 44 puts rank 0's survival boundary at or below
+  # it was measured on, and gotcha 52 puts rank 0's survival boundary at or below
   # 1.57 GiB spare on the 3060.
   #
   # UNMEASURED on this pair, and the cost is NOT upstream's. They measured +36 ms per
@@ -347,13 +368,26 @@ fi
 # the escape hatch; this is a limit of these kernels, not of the checkpoint.
 case " ${EXTRA_ARGS:-} " in
   *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
-    if [ "${SPEC:-mtp}" != "none" ]; then
-      echo "--dtype float16 needs SPEC=none: this repo's speculative path is bf16-only." >&2
+    if [ "${SPEC:-mtp}" != "none" ] && [ "${SPEC:-mtp}" != "off" ]; then
+      echo "--dtype float16 needs SPEC=off/none: this repo's speculative path is bf16-only." >&2
       echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
       echo "  so it fails to compile at the first attention." >&2
       exit 1
     fi ;;
 esac
+
+# Accurate llama-swap telemetry remains on by default in this fork. Use an
+# array (rather than a failing command substitution under set -e), and permit
+# REQ_METRICS=0 for runs that deliberately use --disable-log-stats.
+METRICS_ARGS=()
+if [ "${REQ_METRICS:-1}" = "1" ]; then
+  case " ${EXTRA_ARGS:-} " in
+    *" --disable-log-stats "*)
+      echo "REQ_METRICS=1 is incompatible with --disable-log-stats; set REQ_METRICS=0." >&2
+      exit 1 ;;
+  esac
+  METRICS_ARGS=(--enable-force-include-usage --enable-per-request-metrics)
+fi
 
 # Direct launches use api_key.txt by default. A trusted local proxy such as
 # llama-swap can explicitly disable child authentication with NO_API_KEY=1.
@@ -382,7 +416,7 @@ trap 'exit 143' TERM INT
 
 setsid venv/bin/vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
-  --host 0.0.0.0 --port "$PORT" \
+  --host "${HOST:-0.0.0.0}" --port "$PORT" \
   --pipeline-parallel-size 2 \
   --distributed-executor-backend mp \
   --gpu-memory-utilization "$GPU_UTIL" \
@@ -395,14 +429,13 @@ setsid venv/bin/vllm serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   $ASYNC_ARGS \
   --max-num-batched-tokens 2048 \
-  $SPEC_ARGS \
+  "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG${CG_MODE},\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \
-  --enable-force-include-usage \
-  --enable-per-request-metrics \
   --enable-prompt-tokens-details \
+  "${METRICS_ARGS[@]}" \
   ${EXTRA_ARGS} &
 SERVER_PID=$!
 wait "$SERVER_PID"

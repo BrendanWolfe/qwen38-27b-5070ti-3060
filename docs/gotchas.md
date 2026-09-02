@@ -273,9 +273,8 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `max_model_len` and fitting the two numbers vLLM prints: the fixed term is 0.88 GiB at
     `DFLASH_TOKENS=7` and 1.66 GiB at 15 — the ratio 0.53 is exactly 9/17, i.e. `(k+2)` — while
     `MAX_SEQS` 1 against 8 moves it by about **8 MiB in total**. So dropping to one slot for a
-    genuinely single-user server buys no context at all, and the slot count at a long block is
-    about CUDA graph memory, not state pages — measured later at 0.13 GiB for 4 slots against
-    0.14 GiB for 8, which is why the batch profile now defaults to `MAX_SEQS=8`.
+    genuinely single-user server buys no context at all, and `MAX_SEQS=4` at a long block is
+    about CUDA graph memory, not state pages.
 
     That is about the SIZE of the pool. It says nothing about how much of the pool a
     *running* request takes, and there the per-request model is right — it is the same
@@ -601,7 +600,205 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     two-token label difference shifts every block hash and manufactures a
     convincing, fake "per-request hash instability" (ask how we know).
 
-43. **Cold compiler scratch can be miscounted as model activation memory.**
+43. **"Every request re-prefills" is measurable, and the cause is usually the
+    client's bytes, not the cache.** Reported against an agent client in
+    [#47](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/47) (44 s mean
+    TTFT at ~44k context, i.e. a full recompute per turn, while plain chat
+    clients on the same server sat at the documented decode rates). Work the
+    list in order:
+
+    1. **Measure, per request.** The launchers pass
+       `--enable-prompt-tokens-details`, so every response's
+       `usage.prompt_tokens_details.cached_tokens` says how much of that
+       prompt hit. (vLLM never emits DeepSeek's `prompt_cache_hit_tokens`
+       field; this is the equivalent.) Server-side,
+       `vllm:prefix_cache_queries` / `vllm:prefix_cache_hits` on `/metrics`
+       give the same as counters.
+    2. **Know the floor.** Hits are counted in whole hash units and the
+       recurrent state resumes only at aligned boundaries
+       (`--mamba-cache-mode align`), so the hit length truncates DOWN to a
+       multiple of the unit — a prompt shorter than one unit can never hit,
+       and a shared prefix pays up to one unit of recompute past the match.
+       This is a fixed tax, not the 100%-miss failure mode.
+    3. **Byte-identity is over the RENDERED prompt.** What the cache hashes
+       is the chat-templated token stream: system prompt + tool definitions +
+       every message, in order. One changed byte at position P invalidates
+       everything after P. The classic offenders are dynamic content early in
+       the payload: a timestamp or "current status" block in the system
+       prompt, a heartbeat line spliced into the history, compaction that
+       rewrites old turns, tool lists whose order is not stable. Diff two
+       consecutive requests' FULL bodies (not just system + tools — the
+       messages array too) and find the first differing byte; that byte is
+       where your cache hit ends.
+    4. **Interleaving evicts.** A cached prefix on this hybrid model holds
+       KV blocks plus a recurrent-state page (~16% of the pool per request at
+       k=7), and the pool is small. Two conversations round-robining — an
+       agent's heartbeat pinging between chat turns is exactly that — can
+       each evict the other before its recheck: measured as 0-of-3 warm in a
+       3-context round-robin on 24 GB
+       ([docs/wsl2-4090.md](wsl2-4090.md), retention section). The CPU
+       offload tier turns that back into 3-of-3 (a RAM restore instead of a
+       re-prefill).
+    5. **The isolating experiment.** Bypass every proxy and fire the same
+       long prompt twice at bare vLLM: if TTFT collapses on the second call,
+       the server cache is healthy and the variable is the client payload
+       (or a proxy that mutates it); if it does not, look at the server —
+       and at 2 and 4 above.
+
+44. **`CTX=long`'s fp8 KV cache has exactly one attention backend on sm86, and
+    it is the one cell of the matrix this repo cannot A/B.** `FLASH_ATTN`
+    refuses fp8 KV at startup ("requires FA3 on SM90 or FA4 on SM100" —
+    [#34](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/34)) and
+    `TRITON_ATTN` refuses it too ("native FP8 (fp8e4nv) requires SM89+",
+    measured on the reference 3090), so the tier always auto-selects
+    FlashInfer. #34 tracks a deterministic Xid-31 MMU write-fault (same
+    virtual address twice, ~40 h uptime each) on that combination with MTP +
+    prefix caching + chunked prefill at 28-34k context; cause unattributed
+    between flashinfer's workspace and the async-scheduling window as of this
+    entry. If you hit it, the flashinfer-free fallback is the int8 tier:
+    `SPEC=dflash2 CTX=long` ships it by default, and for `SPEC=mtp` it is
+    `VLLM_SPEC_DECODE_ATTN=1 EXTRA_ARGS="--attention-backend=TRITON_ATTN
+    --kv-cache-dtype=int8_per_token_head"`. Measured cost on the reference
+    box: 17.9k in + 256 out takes 23.7 s against fp8/FlashInfer's 18.9
+    (~25% wall at that depth, mostly Triton prefill); in exchange the same
+    pinned pool holds more tokens at int8's geometry. The default stays
+    fp8/FlashInfer: two faults on one box do not justify a 25% tax on every
+    other box, but you should know which combination you are running.
+
+45. **On a low-RAM host, don't let the stock loader race page-cache eviction —
+    stream the weights.** A 16 GB host (~10 GiB actually free) died loading the
+    15.9 GiB checkpoint at shard 5/8
+    ([#39](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/39)). Measured
+    here under a 10 GiB cgroup cap standing in for that box: the **stock
+    loader's memory peak was the cap to the byte** (10,737,418,240) — it loads
+    by consuming everything and betting reclaim keeps up, which a fast NVMe
+    wins and a busy desktop loses; pushed past the edge it reclaim-thrashes so
+    hard the process stops responding even to SIGKILL (uninterruptible I/O),
+    which is also what a "hung load" looks like from the outside. The **Run:ai
+    streamer bounds the load instead, and is faster here**: 6.3 s vs 11.7 s to
+    load, 8.46 GB process-wide peak under the same cap (its `memory_limit`
+    caps the staging window; the rest is the engine's ordinary host
+    footprint):
+
+    ```bash
+    venv/bin/pip install runai-model-streamer humanize
+    # NOT runai-model-streamer-s3: it force-imports boto3 at package import
+    # and breaks the loader on a box without it; local files don't need it.
+    EXTRA_ARGS='--load-format=runai_streamer --model-loader-extra-config={"memory_limit":2147483648}' \
+      bash single-user/start_qwen.sh
+    ```
+
+    Two adjacent facts from the same experiment: `swapon` cannot save the
+    stock loader (mmap'd read-only file pages evict, they never swap — only
+    the engine's anonymous memory benefits), and the whole test ran under
+    `SPEC=off`, which as of this entry is a real mode rather than a silent
+    fall-through to mtp.
+
+    Two more from the #39 reporter's own box, once the loader was solved:
+    `memory_limit` sized at or above the checkpoint's largest single tensor is
+    the conservative setting (the bf16 `embed_tokens` is 2,542,796,800 bytes on
+    both variants; the 2 GiB above loaded fine on the reference box, 2542796800
+    is what they settled on) — and the *next* failure on a 24 GB card was not
+    RAM at all: the plain `-W4A16-AutoRound` checkpoint leaves only 1.56 GiB for
+    KV at `GPU_UTIL=0.93`, which cannot hold the 64k default (`max seq len
+    65536 ... 4.76 GiB KV cache is needed`). The `-fast` variant (int4 lm_head
+    and MTP head, `prepare/fetch_fast_variant.py`) is the launcher default for
+    exactly that reason; with it the same box came up at a 72k-token pool.
+
+46. **`vllm bench serve` defaults to `--seed 0`, and with prefix caching that
+    poisons every A/B.** Same seed = same prompts call to call; later calls
+    get partial prefix-cache hits whose size depends on the arm's pool
+    geometry, so the contamination differs *between the configs you are
+    comparing*. Measured: a 16k prefill "at" 4.0 s that cold costs 11.2 s
+    (spec-off arm, big pool) next to a baseline reading 15-20% low. Every
+    random-dataset call needs its own `--seed`; `bench/run_benchmarks.sh`
+    does this now (`SEED_BASE` pins the sequence).
+
+47. **Changing `VLLM_MARLIN_INT8_INCLUDE_RE` can replay a stale AOT-compiled
+    graph.** The layer-select envs are in vLLM's compile hash, but
+    `torch_aot_compile` keeps its own cache; switching the include set can
+    crash at the first forward with a stable-ABI `aten::empty` RuntimeError
+    from a cached inductor artifact. Wipe `~/.cache/vllm/torch_compile_cache`
+    when switching layer sets. Separately, `INT8_LAYERS="mlp|linear_attn"`
+    (int8 GDN + fp16 attention) crashes even from a clean cache — an inductor
+    codegen bug with that mixed set on this torch pin; `mlp` and the full
+    default both compile fine.
+
+48. **`--max-num-batched-tokens` above 2048 does not boot in single-user
+    dflash2 mode.** 4096 and 8192 both inflate the profiled activation peak
+    past the transient floor next to the pinned `KV_MEM` pool: the engine
+    fails initialization (batch mode documented the softer version of this —
+    bigger chunks shrink the pool; with the pool pinned, the same memory
+    comes out of the floor instead).
+
+49. **Align-mode prefix caching periodically drops whole conversations to a
+    0% hit — a geometry lottery plus an inverted eviction order on the one
+    mamba state page that unlocks them.** A hybrid cache hit is the
+    *intersection* of per-group hits, and the mamba group can only resume
+    from a retained state snapshot; without one at or below the attention
+    match (minus one 448-token EAGLE margin with spec decode), a fully
+    cached multi-thousand-token attention prefix reads as a 0% miss and
+    re-prefills from scratch (issue #52, upstream vllm#45238 — the same
+    veto is why `--prefix-match-unit` can make things *worse* with spec
+    decode). Three stock behaviors compose: align mode materializes ~one
+    usable snapshot per turn at the last prefill chunk boundary, and on
+    ~22% of turns (448/2048) it lands inside the EAGLE margin — that is
+    the reported "every 4-5 turns" period; the fallback (the previous
+    turn's snapshot, i.e. the block the hit resumed from) is CoW-released
+    early in the turn; and mid-decode frees put every reusable snapshot at
+    the *front* of the free queue while the attention blocks they unlock
+    sit at the back. Any interleaved traffic evicts the snapshots first,
+    and an unlucky turn with the fallback gone reconciles to 0. Measured
+    (12-turn conversation, two unrelated requests between turns, shrunk
+    pool): 81-91% hits for five turns, then 0% on every turn, TTFT 2.1 s →
+    17-31 s, the coordinator logging a discarded 16,576-token attention
+    match. `patches/mamba-align-checkpoint-order.patch` keeps up to three
+    state blocks per running request per mamba group — the CoW-carried key
+    plus the last written prompt-region snapshots — until request end,
+    freed last. It ships **default off** (measured no-harm at two pool
+    sizes, but the win regime — context comparable to the pool over many
+    turns — is not cheaply reproducible in a short cell); enable with
+    `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1` if you see the periodic spikes. Two stronger variants — pinning the snapshots against
+    eviction, bounded or not — measured *worse*: each skipped eviction
+    lands on the conversation's own attention tail instead, which breaks
+    the same hit from the other side. If between-turn traffic exceeds the
+    whole free pool, nothing survives by policy; that regime needs a
+    bigger `KV_MEM`, not a smarter queue.
+
+50. **First-request Triton compiles on a fresh boot came from four separate
+    warmup gaps, and the last one is invisible without logging what Triton
+    specialises on.** Issue #48's fingerprint — a stall in the first large
+    chunked prefill after boot, preceded by `jit_monitor` warnings — had, on
+    the reference 3090 (`SPEC=dflash2 CTX=huge`, one 30k-token first
+    request), four kernels compiling inside request 1, each with its own
+    cause: (1) `_prepare_dflash_inputs_kernel`'s `BLOCK_SIZE` ladder only
+    reaches 256 on a large prefill continuation, never in decode-shaped
+    dummies (`patches/dflash2-prewarm.patch` compiles every rung at boot);
+    (2) the rejection sampler's three kernels are upstream vLLM's and never
+    run in the profile-time dummy sampler pass, which has no draft tokens
+    (`patches/spec-sampler-prewarm.patch` runs one spec-shaped verify in
+    `kernel_warmup()`); (3) KVarN's block→slot lookup was sized to a 1024
+    floor at profile time and resized by the first serving build, and its
+    size is a kernel constexpr (`NUM_BLOCKS_LOOKUP`) — now derived once at
+    impl construction from the KV budget as an upper bound (48,934 slots for
+    6,103 real blocks; the kernels bound-check, so over-sizing is free); and
+    (4) the one that survived all of the above: Triton specialises *integer*
+    arguments on divisibility by 16, and the block table's row stride is its
+    width — the warmup's `cdiv(max_model_len, group)` = 1920 carries the
+    attribute, the runner's real table is 1921 wide and does not, so the two
+    launches were different compiled variants however faithfully the shapes
+    were mirrored. `stride_bt_b` joined `MAX_BLOCKS_PER_REQ` in the kernel's
+    `do_not_specialize`. Measured after all four: **zero** `JIT compilation
+    during inference` lines on the same boot and request. The tool that
+    found (4): `KVARN_SPEC_DEBUG=1` logs pointer alignment and integer
+    divisibility / equal-to-1 for the warmup launch and the first real
+    launches of the packed-kv kernel — diff the two lines.
+    `--jit-monitor-verbose` prints the signature of each in-request compile
+    but truncates the specialisation attributes at 120 characters, which is
+    why it could name the kernel and not the cause. `KVARN_LOOKUP_BLOCKS`
+    pins the lookup size if a deployment ever needs to.
+
+51. **Cold compiler scratch can be miscounted as model activation memory.**
     vLLM resets PyTorch's peak counter and compiles/runs the dummy forward
     inside the same memory-profiling window. If the exact TorchInductor/Triton
     artifact is missing, compilation and autotuning allocate temporary GPU
@@ -641,7 +838,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not the cause. Do not
     clear it to alter the profile; gotcha 3 still applies.
 
-44. **A pinned KV pool passing its sizing check does not predict whether the
+52. **A pinned KV pool passing its sizing check does not predict whether the
     server will survive a request.** `--kv-cache-memory` skips memory profiling
     entirely. The `available` value used by the KV sizing path is then the pool
     budget you selected, not a measurement of the free VRAM each rank will have

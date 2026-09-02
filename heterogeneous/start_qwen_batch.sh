@@ -48,7 +48,7 @@ MAX_LEN=${MAX_LEN:-147456}
 # against the four-slot 73.1/120.8/212.7). The only cost is CUDA graph memory,
 # 0.13 -> 0.14 GiB, about 1.3k tokens of pool -- the much larger pool swing
 # between starts comes from cold compiler scratch being charged during memory
-# profiling (gotcha 43), not this. Past eight the curve flattens but latency does not:
+# profiling (gotcha 51), not this. Past eight the curve flattens but latency does not:
 # C12 is +13% for 82 ms ITL, C16 is +28% for a ~3 s TTFT. See
 # heterogeneous/README.md.
 MAX_SEQS=${MAX_SEQS:-8}
@@ -62,7 +62,7 @@ MAX_SEQS=${MAX_SEQS:-8}
 # peak, so the pool from otherwise identical commands
 # ranges over 146,086 / 157,500 / 184,891 tokens, and the refusal threshold
 # over 148,096 / 159,744 / ~189,000. This frozen profile keeps the cold-safe
-# floor instead of adding retry behavior. See gotcha 43.
+# floor instead of adding retry behavior. See gotcha 51.
 GPU_UTIL=${GPU_UTIL:-0.91}
 API_SERVERS=${API_SERVERS:-1}
 KV=${KV:-fp8}
@@ -85,11 +85,11 @@ case " ${EXTRA_ARGS:-} " in *"--tensor-parallel-size"*|*" -tp "*)
 # --kv-cache-memory is applied PER WORKER (vllm/v1/worker/gpu_worker.py), so a pin
 # here reserves the same bytes on BOTH cards, and it skips memory profiling: a pin
 # that passes its sizing check has not shown that either rank still has room for
-# graph capture, prefill workspaces and NCCL (gotcha 44). This profile ships no
+# graph capture, prefill workspaces and NCCL (gotcha 52). This profile ships no
 # pin; the DFlash2 wrappers do.
 case " ${EXTRA_ARGS:-} " in *"--kv-cache-memory"*)
   echo "INFO: --kv-cache-memory is per PP rank and disables memory profiling. Validate" \
-       "with a real long prompt followed by /health, not with a clean boot (gotcha 44)." >&2
+       "with a real long prompt followed by /health, not with a clean boot (gotcha 52)." >&2
 ;; esac
 
 if [ "$KV" = "bf16" ]; then
@@ -112,15 +112,27 @@ ASYNC_ARGS=$([ "$ASYNC_SCHED" = "1" ] && echo --async-scheduling || echo --no-as
 # first concurrent batch with torch.OutOfMemoryError inside the engine
 # (docs/gotchas.md, gotcha 38). Past the cap the oversized batches run piecewise
 # instead of not at all. Set CG explicitly to override.
-SPEC_ARGS=""
+SPEC_ARGS=()
 if [ "$SPEC" = "mtp" ]; then
   # PR #46994 implements MTP+PP on the V2 model runner.
   export VLLM_USE_V2_MODEL_RUNNER=1
-  SPEC_ARGS="--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
+  SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}")
   CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1) > 64 ? 64 : MAX_SEQS * (DRAFT_TOKENS + 1)))}
-else
+elif [ "$SPEC" = "off" ] || [ "$SPEC" = "none" ]; then
   CG=${CG:-$MAX_SEQS}
+else
+  echo "SPEC=$SPEC is not a mode here: mtp (default) or off/none." >&2
+  echo "Use heterogeneous/start_qwen.sh for DFlash2." >&2
+  exit 1
 fi
+
+# Friendly aliases for upstream's new opt-in prefix-retention and BF16-prefill
+# paths. Neither changes this frozen FP8 profile at its defaults: the int8-QK
+# attention kernel requires BF16 KV, and checkpoint retention only changes
+# eviction order under sustained interleaved prefix-cache pressure.
+[ -n "${PREFILL_ATTN:-}" ] && export VLLM_PREFILL_ATTN="$PREFILL_ATTN"
+[ -n "${MAMBA_KEEP_CHECKPOINTS:-}" ] && \
+  export VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS="$MAMBA_KEEP_CHECKPOINTS"
 
 # An explicit CUDAGRAPH_MODE is honoured on every path. Unlike upstream these
 # profiles never pin the capture mode: the residue bug that PIECEWISE works
@@ -216,13 +228,26 @@ fi
 # the escape hatch; this is a limit of these kernels, not of the checkpoint.
 case " ${EXTRA_ARGS:-} " in
   *" --dtype float16 "*|*" --dtype=float16 "*|*" --dtype fp16 "*|*" --dtype=fp16 "*|*" --dtype half "*|*" --dtype=half "*)
-    if [ "${SPEC:-mtp}" != "none" ]; then
-      echo "--dtype float16 needs SPEC=none: this repo's speculative path is bf16-only." >&2
+    if [ "${SPEC:-mtp}" != "none" ] && [ "${SPEC:-mtp}" != "off" ]; then
+      echo "--dtype float16 needs SPEC=off/none: this repo's speculative path is bf16-only." >&2
       echo "  the split-KV verify attention casts to tl.bfloat16 (patches/spec-decode-attn.patch)," >&2
       echo "  so it fails to compile at the first attention." >&2
       exit 1
     fi ;;
 esac
+
+# Accurate llama-swap telemetry remains on by default in this fork. Keep the
+# optional flags in an array so REQ_METRICS=0 cannot terminate this set -e
+# launcher (the command-substitution bug fixed upstream in #59).
+METRICS_ARGS=()
+if [ "${REQ_METRICS:-1}" = "1" ]; then
+  case " ${EXTRA_ARGS:-} " in
+    *" --disable-log-stats "*)
+      echo "REQ_METRICS=1 is incompatible with --disable-log-stats; set REQ_METRICS=0." >&2
+      exit 1 ;;
+  esac
+  METRICS_ARGS=(--enable-force-include-usage --enable-per-request-metrics)
+fi
 
 # Direct launches use api_key.txt by default. A trusted local proxy such as
 # llama-swap can explicitly disable child authentication with NO_API_KEY=1.
@@ -251,7 +276,7 @@ trap 'exit 143' TERM INT
 
 setsid venv/bin/vllm serve "$MODEL" \
   --served-model-name qwen3.8-27b \
-  --host 0.0.0.0 --port "$PORT" \
+  --host "${HOST:-0.0.0.0}" --port "$PORT" \
   --pipeline-parallel-size 2 \
   --distributed-executor-backend mp \
   --gpu-memory-utilization "$GPU_UTIL" \
@@ -264,14 +289,13 @@ setsid venv/bin/vllm serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   $ASYNC_ARGS \
   --max-num-batched-tokens 2048 \
-  $SPEC_ARGS \
+  "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG${CG_MODE},\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \
-  --enable-force-include-usage \
-  --enable-per-request-metrics \
   --enable-prompt-tokens-details \
+  "${METRICS_ARGS[@]}" \
   ${EXTRA_ARGS} &
 SERVER_PID=$!
 wait "$SERVER_PID"

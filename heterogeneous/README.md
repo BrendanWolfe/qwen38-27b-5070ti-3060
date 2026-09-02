@@ -194,7 +194,71 @@ launcher header records the full table; every row was checked by sending a
 prompt near `MAX_LEN` and confirming `/health` still answered afterwards. A
 clean boot proves only that the pool was sized.
 
-### What came from upstream on 2026-08-26, and what it means here
+### What came from upstream on 2026-09-02, and what it means here
+
+The sync from `c954724` through `c32be47` is 95 upstream commits, but commit
+count is the wrong way to decide what belongs in a hardware profile. The useful
+changes divide by whether they alter correctness, remove first-request work, or
+trade memory/quality for speed on this particular pipeline.
+
+**Adopted everywhere:**
+
+- `dflash2-prewarm.patch` and `spec-sampler-prewarm.patch` move DFlash input
+  preparation and rejection-sampler Triton compiles out of request 1 and into
+  boot. That matters at least as much under PP: a surprise compile stalls one
+  rank while its peer waits in the collective. The KVarN backend now similarly
+  fixes its block lookup capacity and Triton specialization keys at construction,
+  closing the remaining first-request compile in the 262k profiles.
+- `spec-decode-scratch-token-units.patch` fixes the scratch allocation introduced
+  by the new int4 multi-query path. Policy remains sequence-counted; buffers are
+  now sized in query tokens and breach state is observable. The fix costs memory
+  only in the Triton int4 backend and is required before that path can be tested
+  safely.
+- KVarN's V2 port now derives its default prefix hash unit from all cache groups,
+  including the drafter's sliding-window group. That closes a second-stage
+  `SPEC=dflash2 KV=int4pth` cache miss. The fork's separate per-PP-rank pool
+  budget patch remains applied after the updated port.
+- `REQ_METRICS` was repaired upstream after `REQ_METRICS=0` could terminate a
+  `set -e` launcher. These profiles keep metrics **on** by default because
+  llama-swap consumes them, but now use arrays, support `REQ_METRICS=0`, and
+  reject its incompatible pairing with `--disable-log-stats`. `SPEC=off/none`
+  is also explicit; typos no longer silently turn speculation off. `HOST=` is
+  now honored.
+
+**Wired, but not promoted to a measured default:**
+
+- `PREFILL_ATTN=int8` selects the new int8-QK kernel only for single-request,
+  BF16-KV, head-dim-256 prefill. Upstream measured up to +5.3% end-to-end at
+  51k on sm86. The frozen profiles use FP8 or KVarN, and the tunable DFlash2
+  BF16 path spans sm120 plus sm86, so this remains an A/B rather than inheriting
+  a one-card result.
+- `INT4_MQ_3D=1` maps to `VLLM_INT4_MQ_3D=1` for `SPEC=dflash2 KV=int4pth`.
+  Upstream's 3D split-KV path removes a severe deep-context 2D walk, but its
+  extra scratch allocation scales with seats and both performance and per-rank
+  headroom need measuring here first.
+- `MAMBA_KEEP_CHECKPOINTS=1` maps to
+  `VLLM_MAMBA_ALIGN_KEEP_CHECKPOINTS=1`. It retains reachable align-mode state
+  snapshots until request end to stop periodic 0%-hit turns under interleaved
+  traffic. Upstream ships it off because the winning regime is retention
+  pressure over many turns; this fork does the same pending a llama-swap soak.
+- `marlin-tune-table.patch` is inert without an external locally built tuning
+  extension. `offload-wsl2-devptr.patch` is inert on this native-Linux host and
+  only affects the optional CPU offload connector under WSL2.
+
+**Tooling and packaging:** the fork now carries the independent MQ3D property
+and operator oracles, seeded prefill harness, generic third-party checkpoint
+fetch/streaming requant tools, Python 3.14 notes, and the upstream Docker
+prepare-on-first-boot flow. Compose deliberately defaults to this fork's GHCR
+image, not upstream's: the latter lacks the PP patches. The workflow derives
+the image name from `github.repository`, so the two images cannot overwrite one
+another.
+
+No published 3090/4090 timing, WSL result, TP result, or new memory pin was
+copied into the five profile defaults. The current 44/20 and reversed 30/34
+partitions and 2.4/2.8 GB DFlash2 pins remain the last values validated by a
+real long prompt followed by `/health` on these cards.
+
+### Previous upstream sync: 2026-08-26
 
 Ten upstream commits, six new vLLM patches. All six apply cleanly on top of this
 fork's stack; what they are *worth* here splits three ways.
@@ -228,7 +292,7 @@ numbers:
   x16, but the DFlash2 profiles run `GPU_IDS=1,0` and rank 0 is then the 3060 on
   **one PCIe lane**. Same copy, order half a second per image instead of 36 ms
   by arithmetic. Worth it there only if 0.86 GiB of 3060 headroom is what you
-  are short of; gotcha 44 says rank 0 dies at or below ~1.57 GiB spare, so it
+  are short of; gotcha 52 says rank 0 dies at or below ~1.57 GiB spare, so it
   sometimes is.
 - `dflash2-ngram-chains.patch` / `CHAIN=1` skips the drafter's forward *and* its
   graph replay while a request reproduces its own context. On a box whose step
@@ -435,7 +499,7 @@ documents the backport.
 This file previously claimed the patch also bought 9,131 tokens of pool
 (146,847 -> 155,978) by lowering the profiled peak activation. That is
 withdrawn. Both numbers are ordinary cold/warm profiling states described in
-gotcha 43, which span 146,086 to 188,769 tokens on this profile with no code
+gotcha 51, which span 146,086 to 188,769 tokens on this profile with no code
 change at all. The patch may or may not help the pool; one run each cannot
 tell, and nothing here has measured it properly.
 
@@ -679,7 +743,7 @@ later NCCL allocation. `--kv-cache-memory` skips profiling entirely, so the
 real per-rank free-VRAM headroom. Survival is gated by free VRAM after weights
 and the pin: this sweep found that rank 1 (the 5070 Ti) needs roughly 2.86 GiB
 or more spare, while rank 0 (the 3060) fails somewhere at or below 1.57 GiB
-(the lower threshold was not fully bracketed). See gotcha 44.
+(the lower threshold was not fully bracketed). See gotcha 52.
 
 Every candidate therefore needs a real prompt and a health check afterwards;
 a clean boot and an initial health check are only setup. `SPEC_ATTN=0` also
@@ -885,7 +949,12 @@ docker compose logs -f hetero
 | `KV` | `fp8` / `bf16` / `fp8fa` / `int4pth` / `int8pth` / `kvarn` | FP8 for MTP (faster decode); BF16 for DFlash2; `int4pth` is int4 per-token-head on the Triton backend, which is what makes 262k fit. Since `patches/int4-kv-per-token-head.patch` `int4pth` also boots under `SPEC=dflash2`, which it previously could not — unmeasured on this pair |
 | `PREFIX_CACHE` | `1` | cache shared prefixes and resume hybrid recurrent state |
 | `ASYNC_SCHED` | `1` | asynchronous vLLM scheduler |
-| `INT8_ACT` | empty | W4A16 target; int8 activation GEMMs do not help batch size one |
+| `INT8_ACT` | empty | W4A16 target; `int8` enables W4A8 Marlin GEMMs. Upstream's single-card result shows a prefill win, but it changes quality and is unmeasured across this pair |
+| `PREFILL_ATTN` | unset | `int8` enables the opt-in int8-QK kernel for exact-geometry, single-request BF16 prefill; falls through on the shipped FP8/KVarN modes and is unmeasured on sm120 |
+| `INT4_MQ_3D` | unset | `1` enables split-KV 3D attention for DFlash2 + `KV=int4pth`; token-sized scratch fix included, performance/headroom unmeasured here |
+| `MAMBA_KEEP_CHECKPOINTS` | unset | `1` retains reachable align-mode Mamba state snapshots through request end to reduce periodic 0%-hit turns under interleaved cache pressure |
+| `REQ_METRICS` | `1` | accurate per-request llama-swap telemetry; `0` permits `--disable-log-stats` experiments |
+| `HOST` | `0.0.0.0` | API listen address |
 | `NO_API_KEY` | unset | `1` disables child auth for a trusted local proxy |
 | `VISION` | `0` | `1` keeps the vision tower instead of `--language-model-only`. Untested on this pair: `model.visual.*` loads on rank 0, the card that binds the KV pool, so its 0.858 GiB and the encoder's profiled peak both come out of the scarce side |
 | `VISION_OFFLOAD` | `1` | with `VISION=1`, keeps the tower's weights in pinned host RAM and copies each module to the GPU for its own forward (`patches/vision-tower-cpu-offload.patch`), so the 0.858 GiB stops landing on rank 0. `0` keeps it resident. Also untested here — and the per-image copy cost depends on which card is rank 0; see below |
@@ -910,6 +979,15 @@ bash heterogeneous/start_qwen_solo.sh
 
 # Known-correct non-speculative fallback
 SPEC=none MAX_SEQS=8 GPU_UTIL=0.95 bash heterogeneous/start_qwen.sh
+
+# A/B the upstream int8-QK prefill path on the manually tuned BF16 profile
+SPEC=dflash2 KV=bf16 PREFILL_ATTN=int8 bash heterogeneous/start_qwen.sh
+
+# Exercise deep-context DFlash2/int4 MQ3D (experimental; watch per-rank headroom)
+SPEC=dflash2 KV=int4pth INT4_MQ_3D=1 bash heterogeneous/start_qwen.sh
+
+# Retain conversation checkpoints under interleaved prefix-cache pressure
+MAMBA_KEEP_CHECKPOINTS=1 bash heterogeneous/start_qwen_batch.sh
 
 # Disable prefix caching to maximize unrelated one-shot request capacity
 PREFIX_CACHE=0 bash heterogeneous/start_qwen.sh

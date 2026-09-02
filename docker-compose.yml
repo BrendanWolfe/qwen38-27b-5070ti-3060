@@ -23,8 +23,13 @@
 # One GPU: run either "single" or "batch", not both.
 
 x-qwen: &qwen
-  image: qwen38-27b-3090:latest
+  # This must default to the FORK image: upstream's image does not contain the
+  # MTP/DFlash2 pipeline-parallel patches. The workflow publishes this tag on
+  # every main push. QWEN_IMAGE can select an immutable sha-* tag or the
+  # upstream 3090 image for a one-card reproduction.
+  image: ${QWEN_IMAGE:-ghcr.io/brendanwolfe/qwen38-27b-5070ti-3060:latest}
   build: .
+  pull_policy: missing
   ipc: host
   env_file:
     - path: .env

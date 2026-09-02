@@ -62,5 +62,23 @@ if short:
     )
     sys.exit(1)
 print(f"kvarn-v2 runner port complete ({sum(want.values())} markers across {len(want)} files)")
+
+# The fork's PP budget patch is just as essential to every heterogeneous KVarN
+# profile. It is applied after the refreshed upstream V2 port because both touch
+# cuda.py; fail the install instead of silently falling back to one seat.
+pp_patch = here / "kvarn-pp-pool-budget.patch"
+pp_expected = sum(
+    1 for line in pp_patch.read_text().splitlines()
+    if line.startswith("+") and "port(kvarn-pp)" in line
+)
+pp_target = sp / "platforms/cuda.py"
+pp_found = pp_target.read_text().count("port(kvarn-pp)") if pp_target.is_file() else 0
+if pp_found < pp_expected:
+    print(
+        f"ERROR: kvarn-pp-pool-budget.patch incomplete: {pp_found}/{pp_expected} markers",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(f"KVarN PP pool budget complete ({pp_found}/{pp_expected} markers)")
 PY
 echo "kvarn installed"
