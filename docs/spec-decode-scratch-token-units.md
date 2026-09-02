@@ -102,10 +102,10 @@ the same code give different generated text and different draft acceptance at te
 from patched, and tok/s is not an arm metric on that card. Milliseconds per decode step is,
 with a spread of at most 0.9% over all four boots.
 
-| prompt, RTX 4090, fresh cache per boot, 512 tokens generated | boots per arm | stock | patched minus stock, per step |
+| prompt, RTX 4090, fresh cache per boot, 512 tokens generated | boots per arm | stock | difference per step, patched vs stock, each pair |
 |---|---|---|---|
-| 6,747 tokens | 2 | 26.0 ms per step | +0.08% and +0.07% |
-| 68,013 tokens | 2 | 38.1 ms per step | +0.44% and +0.20% |
+| 6,747 tokens | 2 | 26.0 ms per step | 0.08% and 0.07% |
+| 68,013 tokens | 2 | 38.1 ms per step | 0.44% and 0.20% |
 
 So there is no throughput effect at draft depth 7 on either card. The 3090 result above is in
 tokens per second because every one of its boots shared one compile lineage (the cache was
