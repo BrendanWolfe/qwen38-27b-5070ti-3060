@@ -20,6 +20,41 @@ one-card/TP throughput claims are not copied onto unequal cards over PCIe x1.
 Full per-feature accounting:
 [heterogeneous/README.md](heterogeneous/README.md#what-came-from-upstream-on-2026-09-02-and-what-it-means-here).
 
+## Quick start on this GPU pair
+
+Docker Compose defaults to this fork's image,
+`ghcr.io/brendanwolfe/qwen38-27b-5070ti-3060:latest`; the upstream image does
+not contain the pipeline-parallel patches. The first start prepares the model
+in `./models` and caches compiled artifacts in the `qwen-cache` volume:
+
+```bash
+git clone https://github.com/BrendanWolfe/qwen38-27b-5070ti-3060
+cd qwen38-27b-5070ti-3060
+printf 'VLLM_API_KEY=%s\n' "$(openssl rand -hex 24)" > .env
+docker compose --profile hetero up -d
+docker compose logs -f hetero
+```
+
+The Compose profile runs the tunable heterogeneous launcher on both GPUs. For
+the exact measured profiles in the table below, or for a native venv install,
+follow [heterogeneous/SETUP.md](heterogeneous/SETUP.md) and run the named
+wrapper. `QWEN_IMAGE=...` can pin an immutable `sha-<7>` container tag;
+`docker compose up --build` forces a local image build.
+
+The September sync adds three experimental launcher aliases without changing
+any measured default:
+
+| variable | applicable path | status on this pair |
+|---|---|---|
+| `PREFILL_ATTN=int8` | single-request DFlash2 with BF16 KV | upstream measured an sm86 prefill gain; sm120+sm86 PP is unmeasured |
+| `INT4_MQ_3D=1` | DFlash2 with `KV=int4pth` | token-sized scratch fix included; throughput and per-rank headroom unmeasured |
+| `MAMBA_KEEP_CHECKPOINTS=1` | align-mode prefix caching | targets periodic 0%-hit turns under interleaved traffic; pending a local soak |
+
+`REQ_METRICS=1` remains the fork default for llama-swap; set it to `0` before
+using `--disable-log-stats`. `SPEC=off` and `SPEC=none` are explicit baseline
+modes, and invalid `SPEC` values now fail rather than silently changing the
+experiment.
+
 ## Supported setups
 
 | profile | launcher | speculation / slots | KV | context | measured result |
@@ -64,8 +99,6 @@ reasons, not luck:
 - **Speculation amortizes the per-token PCIe/DRAM cost.** MTP-3 lands ~2.8–3.3
   tokens per verify step and DFlash2 up to ~7 with the lookup drafter, so the
   cross-card and memory cost is paid once per step instead of once per token.
-- **FP8 KV halves KV traffic** versus the higher-precision KV a Q5 GGUF run
-  keeps.
 - **It is a serving stack, not an inference loop**: CUDA graphs, Triton/
   FlashAttention kernels for the hybrid-Mamba architecture, per-request
   metrics, and working Qwen tool calling (12/12 API smoke suite).
@@ -80,12 +113,14 @@ Honest tradeoffs versus the GGUF setup:
 - **Quant quality.** 4-bit vs 5.5-bit is a real delta, measured small: IFBench
   78.3 vs 79.5 unquantized, GSM8K 96.5%, perplexity 8.0943. Speculation is
   lossless — the quant is the only lossy layer.
-- **Maintenance surface.** vLLM is pinned at 0.27.1 with 32 patches, five of
-  them carried by this fork (three bespoke to this PP setup); upgrades are
-  projects. GGUF stacks update routinely.
-- **Known workaround.** The DFlash2 drafter runs eagerly
-  (`VLLM_DFLASH_CUDAGRAPH=0`) because its shared quantized LM-head GEMM crashes
-  inside DFlash's private CUDA graph — some speed is left on the table.
+- **Maintenance surface.** vLLM is pinned at 0.27.1 with 32 standard patches
+  plus KVarN's three-stage port. Five standard patches and the KVarN per-rank
+  pool-budget patch are carried by this fork; upgrades are projects. GGUF
+  stacks update routinely.
+- **DFlash2 graph choice.** The drafter remains eager
+  (`VLLM_DFLASH_CUDAGRAPH=0`). This began as a compatibility workaround for
+  its shared quantized LM head; re-enabling the private graph now boots but
+  measured no gain on this pair, so the validated default stays off.
 - **Throughput shape.** The 3060 bounds every step and a full 147k request
   occupies the cache alone. A single stream pays both pipeline stages in
   series, so concurrency is where this pair is strong rather than weak:
@@ -94,6 +129,14 @@ Honest tradeoffs versus the GGUF setup:
 
 ## What changed
 
+- **September upstream advances, selectively ported** — DFlash2 input prep,
+  rejection sampling, and KVarN kernel variants are now precompiled at boot;
+  KVarN's V2 hash geometry and first-request lookup sizing are refreshed; and
+  the int4 multi-query scratch buffers are correctly sized in query-token
+  units. The sm86-tuned BF16 prefill kernel, int4 MQ3D dispatch, and Mamba
+  checkpoint retention are exposed behind the aliases above rather than
+  promoted on untransferrable one-card measurements. The merge also brings
+  seeded prefill/MQ3D oracles and bounded-RAM third-party checkpoint tools.
 - **Single-stream 262k on KVarN** — `heterogeneous/start_qwen_solo.sh` runs the
   model's full native 262,144-token context in a 296,974-token pool at the
   batch profile's decode rate, by spending all of the KV budget on one
@@ -102,8 +145,10 @@ Honest tradeoffs versus the GGUF setup:
   it holds a larger pool than the int4 per-token-head mode it replaces
   (296,974 against 284,234).
 - **GDN metadata hoist** — `patches/vllm-pr52297-gdn-common-metadata.patch`,
-  upstream PR #52297 backported. It does not make this pair faster (0.3%), but
-  it lowers the profiled activation peak and buys 9,131 tokens of KV pool.
+  upstream PR #52297 backported. It does not make this pair faster (0.3%). An
+  earlier version credited it with 9,131 extra KV tokens; the wider launch
+  sample showed that change was cold compiler scratch contaminating vLLM's
+  memory profile, so the patch's pool effect is unmeasured.
 - **Bug B, the uniform-decode prefill dispatch** —
   `patches/zzz-bugb-uniform-prefill.patch`, upstream's `a75ee4b` lifted out of
   `kvarn/kvarn-v2-runner.patch` so it applies without installing KVarN. vLLM's
@@ -154,11 +199,13 @@ Honest tradeoffs versus the GGUF setup:
   `VLLM_MARLIN_INPUT_DTYPE` for W4A16, `GPU_UTIL=0.91` (0.93 OOMed compiled
   prefill), process-group cleanup under `setsid`, `NO_API_KEY` mode, and the
   vLLM flags for accurate per-request metrics and Qwen tool calling.
-- **llama-swap** — the four model entries in
-  `heterogeneous/llama-swap.example.yaml`: MTP batch/solo and DFlash2
-  batch/solo (unprefixed IDs kept as aliases).
-- **Docker** — a `hetero` compose profile (two-GPU reservation) and a `hetero`
-  entrypoint command.
+- **llama-swap** — five model entries in
+  `heterogeneous/llama-swap.example.yaml`: FP8 MTP batch, KVarN MTP
+  batch/solo, and KVarN DFlash2 batch/solo.
+- **Docker** — a `hetero` compose profile (two-GPU reservation), a `hetero`
+  entrypoint command, prepare-on-first-boot, and a fork-specific GHCR image.
+  Compose must not default to upstream's image because it lacks these PP
+  patches.
 
 Full details, benchmarks, the DFlash2 memory-sizing trap, and limitations are
 in [heterogeneous/README.md](heterogeneous/README.md); the two-GPU work is also
