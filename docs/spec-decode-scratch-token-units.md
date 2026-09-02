@@ -89,6 +89,12 @@ n-gram chain extension, which lengthens a draft when recent tokens match an earl
 occasionally proposes more than the base 7 tokens. So #46's gain on 8-token batches is
 unaffected, and only the 9 to 16 band was falling back.
 
+A throughput comparison on the RTX 4090 was attempted and is not reported: across ten boots
+with no code change, that card's decode rate drifted between 48 and 144 tok/s at the same
+prompt, tracking its power draw at full utilisation, so a difference bounded at 0.66% cannot
+be resolved there. The 4090's contribution to this PR is the independent numerical check and
+the dispatch proof, not a throughput number. The throughput result above is one card.
+
 A deeper draft would put that band in the common case, and it is not reachable with this
 drafter on this card. The checkpoint is trained at depth 7; at depth 11 its own log reads
 "drafting 7 tokens per step (the block the checkpoint was trained for); the remaining 4 of 11
