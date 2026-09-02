@@ -96,8 +96,11 @@ from stock code, in an unusually short compile, ran at full speed in the process
 it and about 2.6x slower in every process that later loaded it, on both cards, with identical
 output. The cache does not distinguish boots, so every later boot, stock or patched, inherited
 it (same card, empty cache: 148 tok/s; shared cache thirteen minutes earlier: 80). Dropping
-that one artifact restored the original rates to the decimal; the mechanism is not known, and
-the patched boot's own artifact was found harmless. Redone with a fresh, empty cache for every
+that one artifact restored the original rates to the decimal. The affected artifact is the one a
+boot writes when it loads one compiled module from the cache and recompiles another; a boot
+that compiles everything, or loads everything, does not produce or hit it. The patched boot's
+own artifact was harmless. To reproduce the numbers here, use an empty compile cache per boot
+or `VLLM_DISABLE_COMPILE_CACHE=1`. Redone with a fresh, empty cache for every
 boot, the card quiet and the other card idle, stock/patched/stock/patched: fresh compiles of
 the same code give different generated text and different draft acceptance at temperature 0
 (steps to generate 512 tokens at 6,747 tokens of prompt: 133 and 153 for the two stock boots,
