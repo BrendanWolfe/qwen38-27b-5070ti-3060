@@ -69,6 +69,9 @@ layers, 4 allocations). The formula scales with max_num_seqs -- 903 MiB at
 32 -- and that is stated rather than silently capped, because a silent cap
 would recreate exactly the accidental fallback this removes.
 
+The reason-bit debug line replaces the earlier debug line rather than adding to it, so
+VLLM_INT4_MQ_3D_DEBUG=1 prints once per attention call as before.
+
 VERIFICATION
 
   property test    238,276 policy-eligible batches over 4,032 config tuples,
@@ -298,7 +301,7 @@ VERIFICATION
          and q.shape[0] <= softmax_segm_output.shape[0]
          and q.shape[0] <= softmax_segm_max.shape[0]
          and q.shape[0] <= softmax_segm_expsum.shape[0]
-@@ -763,13 +811,72 @@
+@@ -763,21 +811,73 @@
      use_3d = not (
          seq_threshold_3D is None
          or num_par_softmax_segments is None
@@ -346,7 +349,7 @@ VERIFICATION
 +    # The reason bit: which predicate said no. Kept because "it fell back" was the whole
 +    # defect -- the seq-vs-token bug was invisible for as long as the fallback had no
 +    # stated cause. Off unless explicitly enabled.
-+    if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
+     if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
 +        _why = []
 +        if seq_threshold_3D is None: _why.append("no_seq_threshold")
 +        if num_par_softmax_segments is None: _why.append("no_segments")
@@ -360,22 +363,24 @@ VERIFICATION
 +        if seq_threshold_3D is not None and num_seqs > seq_threshold_3D:
 +            _why.append("num_seqs_threshold_failed")
 +        if is_batch_invariant: _why.append("batch_invariant_guard")
-+        print(
-+            f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
-+            f"max_seqlen_q={max_seqlen_q} use_3d={use_3d} "
+         print(
+             f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
+             f"max_seqlen_q={max_seqlen_q} use_3d={use_3d} "
+-            f"segments={num_par_softmax_segments if use_3d else 1}",
 +            f"declared_capacity={scratch_token_capacity_3d} "
 +            f"qlen_cap={_qlen_cap} seq_threshold_3D={seq_threshold_3D} "
 +            f"rows={None if softmax_segm_output is None else softmax_segm_output.shape[0]} "
 +            f"| breach_count={MQ3D_CAPACITY_BREACH['count']} "
 +            f"degraded={MQ3D_CAPACITY_BREACH['degraded']} "
 +            f"| reasons={','.join(_why) if _why else 'NONE(3d eligible)'}",
-+            flush=True,
-+        )
+             flush=True,
+         )
+ 
 +
-     if os.environ.get("VLLM_INT4_MQ_3D_DEBUG") == "1":
-         print(
-             f"[int4-mq3d] tokens={q.shape[0]} num_seqs={num_seqs} "
-@@ -938,6 +1045,8 @@
+     # 3D never reads ``output_ptr`` and 2D never reads the segm tensors,
+     # but Triton needs a non-null pointer everywhere; reuse ``out`` as
+     # the placeholder for the unused side.
+@@ -938,6 +1038,8 @@
      k_scale_cache: torch.Tensor,
      v_scale_cache: torch.Tensor,
      seq_threshold_3D: int | None = None,
@@ -384,7 +389,7 @@ VERIFICATION
      num_par_softmax_segments: int | None = None,
      softmax_segm_output: torch.Tensor | None = None,
      softmax_segm_max: torch.Tensor | None = None,
-@@ -977,6 +1086,8 @@
+@@ -977,6 +1079,8 @@
          k_scale_cache=k_scale_cache,
          v_scale_cache=v_scale_cache,
          seq_threshold_3D=seq_threshold_3D,
