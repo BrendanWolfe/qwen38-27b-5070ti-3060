@@ -90,11 +90,14 @@ occasionally proposes more than the base 7 tokens. So #46's gain on 8-token batc
 unaffected, and only the 9 to 16 band was falling back.
 
 **RTX 4090, and a method finding.** The first attempt on that card produced decode rates
-between 48 and 144 tok/s across boots with no code change. The cause was the shared
-torch.compile cache: vLLM's ahead-of-time compile cache key does not cover a site-packages
-patch outside the compiled graph, so the first patched boot's artifact became a cache hit for
-every later boot, stock or patched, and that lineage was slow (same card, empty cache: 148
-tok/s; shared cache thirteen minutes earlier: 80). Redone with a fresh, empty cache for every
+between 48 and 144 tok/s across boots with no code change. The cause was one artifact in
+the shared torch.compile cache: an ahead-of-time compile artifact written by an earlier boot
+from stock code, in an unusually short compile, ran at full speed in the process that produced
+it and about 2.6x slower in every process that later loaded it, on both cards, with identical
+output. The cache does not distinguish boots, so every later boot, stock or patched, inherited
+it (same card, empty cache: 148 tok/s; shared cache thirteen minutes earlier: 80). Dropping
+that one artifact restored the original rates to the decimal; the mechanism is not known, and
+the patched boot's own artifact was found harmless. Redone with a fresh, empty cache for every
 boot, the card quiet and the other card idle, stock/patched/stock/patched: fresh compiles of
 the same code give different generated text and different draft acceptance at temperature 0
 (steps to generate 512 tokens at 6,747 tokens of prompt: 133 and 153 for the two stock boots,
