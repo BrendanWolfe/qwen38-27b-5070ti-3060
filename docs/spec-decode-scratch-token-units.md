@@ -89,11 +89,28 @@ n-gram chain extension, which lengthens a draft when recent tokens match an earl
 occasionally proposes more than the base 7 tokens. So #46's gain on 8-token batches is
 unaffected, and only the 9 to 16 band was falling back.
 
-A throughput comparison on the RTX 4090 was attempted and is not reported: across ten boots
-with no code change, that card's decode rate drifted between 48 and 144 tok/s at the same
-prompt, tracking its power draw at full utilisation, so a difference bounded at 0.66% cannot
-be resolved there. The 4090's contribution to this PR is the independent numerical check and
-the dispatch proof, not a throughput number. The throughput result above is one card.
+**RTX 4090, and a method finding.** The first attempt on that card produced decode rates
+between 48 and 144 tok/s across boots with no code change. The cause was the shared
+torch.compile cache: vLLM's ahead-of-time compile cache key does not cover a site-packages
+patch outside the compiled graph, so the first patched boot's artifact became a cache hit for
+every later boot, stock or patched, and that lineage was slow (same card, empty cache: 148
+tok/s; shared cache thirteen minutes earlier: 80). Redone with a fresh, empty cache for every
+boot, the card quiet and the other card idle, stock/patched/stock/patched: fresh compiles of
+the same code give different generated text and different draft acceptance at temperature 0
+(steps to generate 512 tokens at 6,747 tokens of prompt: 133 and 153 for the two stock boots,
+143 and 152 for the two patched), so two stock boots differ in tok/s as much as stock differs
+from patched, and tok/s is not an arm metric on that card. Milliseconds per decode step is,
+with a spread of at most 0.9% over all four boots.
+
+| prompt, RTX 4090, fresh cache per boot, 512 tokens generated | boots per arm | stock | patched minus stock, per step |
+|---|---|---|---|
+| 6,747 tokens | 2 | 26.0 ms per step | +0.08% and +0.07% |
+| 68,013 tokens | 2 | 38.1 ms per step | +0.44% and +0.20% |
+
+So there is no throughput effect at draft depth 7 on either card. The 3090 result above is in
+tokens per second because every one of its boots shared one compile lineage (the cache was
+not cleared between arms), which is fine for the difference between arms and means the
+absolute tok/s figures belong to that lineage rather than to the hardware.
 
 A deeper draft would put that band in the common case, and it is not reachable with this
 drafter on this card. The checkpoint is trained at depth 7; at depth 11 its own log reads
