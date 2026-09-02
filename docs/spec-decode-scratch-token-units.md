@@ -16,7 +16,8 @@ capacity.
 
 Qwen3.8-27B-W4A16-AutoRound with its DFlash2 drafter (`Qwen3.8-27B-DFlash2-W4A16`), int4
 per-token-head KV cache (`single-user/alternative.sh`), draft depth 7, `max_num_seqs=1`,
-`max_num_batched_tokens=2048`, CUDA graphs on, `--prefix-match-unit 848`, temperature 0,
+`max_num_batched_tokens=2048`, CUDA graphs on, `--prefix-match-unit 848` (not required on current
+main, where the engine derives the same unit; passed for parity with earlier runs), temperature 0,
 thinking off, context limit 262,144. RTX 3090, native Ubuntu 26.04, Python 3.14, vLLM 0.27.1,
 torch 2.13.0+cu130, CUDA 13.0, driver 610.43.02. Nothing else ran on the box during the
 throughput runs (each boot waited for load average below 1.3). The independent numerical
@@ -106,15 +107,52 @@ configurations, 0 violations. `--mutate seq-rows` (sequence-unit sizing, the eag
 pre-fix allocation) fails 129,498 of them; `--mutate snapped-rows` (sequence-unit sizing after
 the capture-list substitution, what #46 ran under CUDA graphs) fails 140,008.
 
-**Independent numerical check**, written on the 4090 box without reference to this patch's
-code, against a separate fp32 attention over a separate dequantisation of the cached bytes:
-9 of 9 cases. The cases that matter: a 17-token single sequence (rejected by the per-sequence
-limit, capacity never consulted) against a 16+1 two-sequence batch (the same 17 tokens,
-accepted); a padded zero-length sequence with NaN-prefilled scratch (nothing leaked); an
-over-capacity batch checked through `mq3d_breach_state()`. Reverting the file to
-sequence-unit sizing makes every multi-query case breach and leaves exactly the one-token and
-17-token cases green, which is the original defect's signature. The check's script is not
-part of this PR. Scope: the reference reads the cached bytes the production write path
+**Independent numerical check**, `bench/mq3d_layer2_oracle.py`, with its verdict records in
+`bench/mq3d_layer2_verdicts.jsonl`. Written on the 4090 box without reference to this patch's
+code, it imports the production allocation and dispatch (the real
+`TritonAttentionMetadataBuilder` and `_launch_packed_attn`, entered through
+`unified_attention()` as the backend enters it), runs every case through the multi-query
+kernel disabled (`VLLM_INT4_MQ_3D=0`, the 2D leg) and enabled (the 3D leg) with NaN-prefilled
+scratch, and compares both legs against a separate fp32 attention over its own
+dequantisation of the cached bytes. `_launch_packed_attn` is call-counted per case, so a
+green that never reached the production path cannot occur. Declared configuration:
+`max_num_seqs=2`, `max_num_batched_tokens=8192`, eager (no CUDA graphs; the capture-list
+substitution is a separate change), which gives capacity 32 so that the 17-token
+`[16, 1]` case is admissible. Real geometry from the served model (24 query heads, 4 KV
+heads, head dim 256). Run with `python bench/mq3d_layer2_oracle.py` on a machine with the
+patched stack, a CUDA device and the model directory it names; it rewrites the verdict file.
+
+| case | query lengths | 3D-leg reason | 2D vs 3D, max abs diff | vs reference, max abs (2D / 3D) |
+|---|---|---|---|---|
+| row0-decode-[1] | `[1]` | `NONE(3d eligible)` | 0.0000 | 0.0312 / 0.0312 |
+| row1-boundary-[16] | `[16]` | `NONE(3d eligible)` | 0.0078 | 0.0308 / 0.0309 |
+| row2-policy-[17] | `[17]` | `max_query_len_policy>16` | 0.0000 | 0.0372 / 0.0372 |
+| row3-even-[8,8] | `[8, 8]` | `NONE(3d eligible)` | 0.0088 | 0.0306 / 0.0340 |
+| row4-units-[16,1] | `[16, 1]` | `NONE(3d eligible)` | 0.0078 | 0.0314 / 0.0314 |
+| row5-ragged-[1,8,3] | `[1, 8, 3]` | `NONE(3d eligible)` | 0.0078 | 0.0336 / 0.0293 |
+| row6-zerorow-[4,0,3] | `[4, 0, 3]` | `NONE(3d eligible)` | 0.0078 | 0.0344 / 0.0322 |
+| row7-hist-[9] | `[9]` | `NONE(3d eligible)` | 0.0059 | 0.0286 / 0.0285 |
+| row9-wild-[848] | `[848]` | `max_query_len_policy>16` | 0.0000 | 0.0320 / 0.0320 |
+| row8-breach-[16,16,16] | `[16, 16, 16]` | `q_token_capacity_failed` |  |  /  |
+
+All 10 cases: both legs finite, the 3D leg writes the scratch and the 2D leg leaves it
+untouched, the two legs agree to within 0.0088 (fp16 reduction order), and both are within
+0.0372 of the reference on outputs of magnitude 17 to 26 (relative 1.9e-3). The 2D leg's
+`mq_but_flag_off` reason is the forced-off flag, as intended; the case under test is the 3D
+leg. The 17-token single sequence is rejected by the per-sequence limit and never reaches the
+capacity question; the `[16, 1]` batch, the same 17 tokens, is accepted. The padded
+zero-length case `[4, 0, 3]` leaks nothing. The breach cases assert `mq3d_breach_state()`
+(count incremented, sticky flag, first specimen kept across a second breach). Reverting the
+production file to sequence-unit sizing makes every multi-query case breach and leaves
+exactly the one-token and 17-token cases green, which is the original defect's signature;
+restoring the file returns 10 of 10.
+
+Provenance recorded in the verdict file: the three surface files by sha256
+(`triton_attn.py` aa3fa23692a2…, `int4_per_token_head.py`
+cf2bf54178d2…, `triton_unified_attention.py`
+24ec41175a58…) and the patch file at c2b5a002e743…, which is
+this patch's content before its header text was rewritten; the diff hunks are identical to
+the shipped file. Scope: the reference reads the cached bytes the production write path
 produced, so it bounds the attention and dispatch, not the cache write.
 
 **Live at `max_num_seqs=8`** (function check only; pre-fix not run at this setting, no
