@@ -83,10 +83,16 @@ n-gram chain extension, which lengthens a draft when recent tokens match an earl
 occasionally proposes more than the base 7 tokens. So #46's gain on 8-token batches is
 unaffected, and only the 9 to 16 band was falling back.
 
-A deeper draft would put that band in the common case. The drafter checkpoint is trained at
-depth 7, so any other depth is off-design for it, and the one we tried (11) exceeded 24 GB at
-262,144 context on this card. We have not yet tried it at shorter context. That regime, and
-multi-sequence serving, are untested for throughput here.
+A deeper draft would put that band in the common case, and it is not reachable with this
+drafter on this card. The checkpoint is trained at depth 7; at depth 11 its own log reads
+"drafting 7 tokens per step (the block the checkpoint was trained for); the remaining 4 of 11
+verify positions are filled from context", so the extra positions are padding, not draft. The
+engine also failed to boot at depth 11 in all eight attempts: at 262,144 context, out of
+device memory during graph capture; at 98,304 context, patched and unpatched, with no
+prefix-match unit and with `--prefix-match-unit 888` (the depth-11 block size is 1,776, which
+848 does not divide), on the KV-cache coordinator's block-divisibility assert
+(`kv_cache_coordinator.py`, `scheduler_block_size % hash_block_size == 0`) or out of device
+memory. That regime, and multi-sequence serving, are untested for throughput here.
 
 ## Verification
 
