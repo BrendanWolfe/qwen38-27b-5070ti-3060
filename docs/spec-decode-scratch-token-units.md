@@ -120,7 +120,8 @@ green that never reached the production path cannot occur. Declared configuratio
 substitution is a separate change), which gives capacity 32 so that the 17-token
 `[16, 1]` case is admissible. Real geometry from the served model (24 query heads, 4 KV
 heads, head dim 256). Run with `python bench/mq3d_layer2_oracle.py` on a machine with the
-patched stack, a CUDA device and the model directory it names; it rewrites the verdict file.
+patched stack and a CUDA device; it rewrites the verdict file beside itself (`ORACLE_OUT`
+overrides the path) and exits non-zero if any case fails.
 
 | case | query lengths | 3D-leg reason | 2D vs 3D, max abs diff | vs reference, max abs (2D / 3D) |
 |---|---|---|---|---|

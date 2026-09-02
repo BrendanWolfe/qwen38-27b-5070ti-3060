@@ -41,7 +41,12 @@ DEV = torch.device("cuda:0")
 torch.manual_seed(0)
 
 VLLM_ROOT = "/app/venv/lib/python3.12/site-packages/vllm"
-OUT_PATH = "/work/layer2-verdicts.jsonl"
+# Verdicts are written beside this script by default; ORACLE_OUT overrides. (The original
+# ran in a container and wrote to /work, which does not exist on a native checkout.)
+OUT_PATH = os.environ.get(
+    "ORACLE_OUT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mq3d_layer2_verdicts.jsonl"),
+)
 
 # ---------------------------------------------------------------- provenance
 def sha256(path):
