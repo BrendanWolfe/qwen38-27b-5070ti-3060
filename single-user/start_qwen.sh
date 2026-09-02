@@ -544,7 +544,10 @@ TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-
 # fields ride on the engine-stats path, so it cannot be paired with
 # --disable-log-stats in EXTRA_ARGS. --enable-prompt-tokens-details is always
 # on. vLLM's per-request *spec-decode* summary flag is nightly-only (not 0.27.1).
-METRICS_ARGS=$([ "${REQ_METRICS:-0}" = 1 ] && echo --enable-per-request-metrics --enable-force-include-usage)
+# Array, not $( [ ] && echo ): that substitution exits 1 when the test is
+# false, which kills a launcher running under `set -e` silently (#59).
+METRICS_ARGS=()
+[ "${REQ_METRICS:-0}" = 1 ] && METRICS_ARGS=(--enable-per-request-metrics --enable-force-include-usage)
 
 # Vision. --language-model-only drops the vision tower cleanly -- no weights loaded,
 # 0.858 GiB on this checkpoint (gotcha 9) -- and stays the default. VISION=1 keeps
@@ -650,6 +653,6 @@ exec venv/bin/vllm serve "$MODEL" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
   --enable-prompt-tokens-details \
-  ${METRICS_ARGS} \
+  "${METRICS_ARGS[@]}" \
   ${TOOL_ARGS} \
   ${EXTRA_ARGS}
