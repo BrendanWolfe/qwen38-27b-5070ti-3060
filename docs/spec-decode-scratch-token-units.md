@@ -67,15 +67,20 @@ deployment; there is no silent cap.
 Metric: decode-only tokens per second, `usage.completion_tokens` divided by the time from the
 first content token to the last (one SSE chunk is one speculative step, not one token, so
 chunk counts are not used). 384 tokens generated after a NASA history prompt. Boots alternate
-patched and unpatched so drift cannot align with the arm. Every run keeps its dispatch log,
-which shows which kernel served the 9-token batches.
+patched and unpatched so drift cannot align with the arm. The timed runs below have the
+dispatch instrumentation off; which kernel served the 9-token batches was proven in separate
+boots with it on (the table above), because the patch adds a debug line and an instrument
+that runs during the measurement is part of the measurement. Arm identity in the timed runs
+comes from the patch's boot-record line, which prints only on the patched arm. Nothing else
+ran on the box; each boot waited for load average below 1.3.
 
 | prompt | boots per arm | patched | unpatched | difference |
 |---|---|---|---|---|
-| 6,747 tokens | 3 | 110.77 tok/s | 110.63 tok/s | +0.13% |
-| 68,013 tokens | 2 | 44.6 tok/s | 44.6 tok/s | within 0.2% (the reporting resolution) |
+| 6,747 tokens, instrumentation off | 2 | 110.88 tok/s | 110.67 tok/s | +0.18% |
+| 6,747 tokens, instrumentation on | 3 | 110.77 tok/s | 110.63 tok/s | +0.13% |
+| 68,013 tokens, instrumentation on | 2 | 44.6 tok/s | 44.6 tok/s | within 0.2% (the reporting resolution) |
 
-The spread across the three patched boots at 6,747 tokens was 0.54%; the 68k arm has too few
+Spreads within an arm: 0.36% and 0.09% (off), 0.54% (on, three boots); the 68k arm has too few
 boots for a spread estimate of its own. The reason for the null is arithmetic. At draft depth
 7 the ordinary verify batch is 8 tokens, 8 is a capture size that already ran the 3D kernel,
 and the band this fixes occurred in 1 of 152 decode steps in the 68k run (a 9-token batch,
