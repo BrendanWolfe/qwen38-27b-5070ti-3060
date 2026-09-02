@@ -120,8 +120,11 @@ green that never reached the production path cannot occur. Declared configuratio
 substitution is a separate change), which gives capacity 32 so that the 17-token
 `[16, 1]` case is admissible. Real geometry from the served model (24 query heads, 4 KV
 heads, head dim 256). Run with `python bench/mq3d_layer2_oracle.py` on a machine with the
-patched stack and a CUDA device; it rewrites the verdict file beside itself (`ORACLE_OUT`
-overrides the path) and exits non-zero if any case fails.
+patched stack and a CUDA device; it locates the installed vLLM and the patch file from the
+checkout (`VLLM_ROOT`, `ORACLE_PATCH` and `ORACLE_OUT` override), rewrites the verdict file
+beside itself, and exits non-zero if any case fails. The original wrote to container paths;
+those three lines are the only change from the 4090 author's version besides four wording
+edits that removed machine names.
 
 | case | query lengths | 3D-leg reason | 2D vs 3D, max abs diff | vs reference, max abs (2D / 3D) |
 |---|---|---|---|---|
@@ -148,7 +151,14 @@ production file to sequence-unit sizing makes every multi-query case breach and 
 exactly the one-token and 17-token cases green, which is the original defect's signature;
 restoring the file returns 10 of 10.
 
-Provenance recorded in the verdict file: the three surface files by sha256
+**Rerun on the 3090** from this branch, unchanged apart from the path fixes below, after the
+patch's header text was rewritten: 10 of 10 cases, 20 of 20 launch calls counted, and every
+case's reason bit and 2D-vs-3D difference identical to the 4090 run. Its verdict file is
+`bench/mq3d_layer2_verdicts-3090.jsonl`, and it records the shipped patch's sha. So the
+independent check holds on both architectures, and the run instruction above is the one that
+produced it.
+
+Provenance recorded in the 4090 verdict file: the three surface files by sha256
 (`triton_attn.py` aa3fa23692a2…, `int4_per_token_head.py`
 cf2bf54178d2…, `triton_unified_attention.py`
 24ec41175a58…) and the patch file at c2b5a002e743…, which is
